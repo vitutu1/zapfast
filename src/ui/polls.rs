@@ -4,7 +4,7 @@ use super::widgets;
 use crate::app::App;
 use crate::model::{Action, Content, Dialog, Message, PollState};
 use crate::theme::{self, Icon, Palette};
-use egui::{Align, Layout, Sense, Stroke, pos2, vec2};
+use egui::{Align, Layout, Rect, Sense, Stroke, pos2, vec2};
 
 pub fn create(app: &mut App, ui: &mut egui::Ui, chat: &str) {
     let palette = app.palette;
@@ -186,6 +186,7 @@ pub fn ballot(
     width: f32,
     enabled: bool,
     pending: bool,
+    blurred: bool,
     actions: &mut Vec<Action>,
 ) {
     let Content::Poll {
@@ -196,6 +197,10 @@ pub fn ballot(
     else {
         return;
     };
+    let poll_id = egui::Id::new(("poll-ballot", &message.chat, &message.id));
+    let prev_rect = ui.ctx().data(|data| data.get_temp::<Rect>(poll_id));
+    let poll_hovered = prev_rect.is_some_and(|r| widgets::rect_hovered(ui, r, 2.0));
+    let poll_blurred = blurred && !poll_hovered;
     let response =
         ui.allocate_ui_with_layout(vec2(width, 0.0), Layout::top_down(Align::Min), |ui| {
             ui.set_width(width);
@@ -209,7 +214,11 @@ pub fn ballot(
             );
             let (rect, _) = ui.allocate_exact_size(question.size(), Sense::hover());
             if ui.is_rect_visible(rect) {
-                question.paint(ui, rect.min, palette.text);
+                if poll_blurred {
+                    question.paint_blurred(ui, rect.min, palette.text);
+                } else {
+                    question.paint(ui, rect.min, palette.text);
+                }
             }
             theme::text(
                 ui,
@@ -262,22 +271,28 @@ pub fn ballot(
                             Stroke::new(1.5, palette.secondary),
                         );
                     }
-                    label.paint(ui, pos2(rect.left() + 25.0, rect.top() + 6.0), palette.text);
+                    if poll_blurred {
+                        label.paint_blurred(ui, pos2(rect.left() + 25.0, rect.top() + 6.0), palette.text);
+                    } else {
+                        label.paint(ui, pos2(rect.left() + 25.0, rect.top() + 6.0), palette.text);
+                    }
                     let count = state.counts.get(index).copied().unwrap_or_default();
-                    ui.painter().text(
-                        pos2(rect.right() - 5.0, center.y),
-                        egui::Align2::RIGHT_CENTER,
-                        count.to_string(),
-                        theme::regular(12.0),
-                        palette.secondary,
-                    );
+                    if !poll_blurred {
+                        ui.painter().text(
+                            pos2(rect.right() - 5.0, center.y),
+                            egui::Align2::RIGHT_CENTER,
+                            count.to_string(),
+                            theme::regular(12.0),
+                            palette.secondary,
+                        );
+                    }
                     let track = egui::Rect::from_min_size(
                         pos2(rect.left() + 25.0, rect.bottom() - 12.0),
                         vec2((width - 30.0).max(0.0), 6.0),
                     );
                     ui.painter()
                         .rect_filled(track, 3.0, palette.text.gamma_multiply(0.10));
-                    if state.voters > 0 && count > 0 {
+                    if !poll_blurred && state.voters > 0 && count > 0 {
                         let fraction = (count as f32 / state.voters as f32).min(1.0);
                         let bar = egui::Rect::from_min_size(
                             track.min,
@@ -343,7 +358,11 @@ pub fn ballot(
             );
             let (rect, _) = ui.allocate_exact_size(line.size(), Sense::hover());
             if ui.is_rect_visible(rect) {
-                line.paint(ui, rect.min, palette.dim);
+                if poll_blurred {
+                    line.paint_blurred(ui, rect.min, palette.dim);
+                } else {
+                    line.paint(ui, rect.min, palette.dim);
+                }
             }
             if !state.can_vote {
                 widgets::rich_text(
@@ -361,6 +380,9 @@ pub fn ballot(
                 );
             }
         });
+    ui.ctx().data_mut(|data| {
+        data.insert_temp(poll_id, response.response.rect);
+    });
     if enabled
         && state.refresh_needed
         && !state.refreshing
@@ -638,6 +660,7 @@ mod tests {
                 320.0,
                 true,
                 false,
+                false,
                 &mut actions,
             )
         });
@@ -660,6 +683,7 @@ mod tests {
                 &row,
                 320.0,
                 true,
+                false,
                 false,
                 &mut actions,
             )

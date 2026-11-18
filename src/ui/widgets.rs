@@ -23,7 +23,7 @@ impl Line {
         self.galley.size()
     }
 
-    pub fn paint(&self, ui: &Ui, pos: egui::Pos2, fallback: Color32) {
+    fn register_label(&self, ui: &Ui, pos: egui::Pos2) {
         let response = ui.interact(
             Rect::from_min_size(pos, self.size()),
             ui.id()
@@ -37,8 +37,251 @@ impl Line {
                 &self.accessible_text,
             )
         });
+    }
+
+    pub fn paint(&self, ui: &Ui, pos: egui::Pos2, fallback: Color32) {
+        self.register_label(ui, pos);
         ui.painter().galley(pos, self.galley.clone(), fallback);
         emoji::paint(ui, &self.galley, pos, &self.placements);
+    }
+
+    pub fn paint_blurred(&self, ui: &Ui, pos: egui::Pos2, fallback: Color32) {
+        self.register_label(ui, pos);
+        paint_pseudo_blur_galley(ui, pos, self.galley.clone(), fallback);
+        if !self.placements.is_empty() {
+            paint_blurred_emojis(ui, &self.galley, pos, &self.placements);
+        }
+    }
+}
+
+/// Whether the pointer is hovering `rect` (optionally expanded by `expand`)
+/// within the current clip rectangle.
+pub fn rect_hovered(ui: &Ui, rect: Rect, expand: f32) -> bool {
+    let target = if expand > 0.0 {
+        rect.expand(expand)
+    } else {
+        rect
+    };
+    ui.rect_contains_pointer(rect)
+        || ui.input(|i| {
+            i.pointer
+                .hover_pos()
+                .is_some_and(|pos| target.contains(pos) && ui.clip_rect().contains(pos))
+        })
+}
+
+const MAX_DIFFUSE_GALLEYS: usize = 256;
+
+struct DiffuseEntry {
+    job: std::sync::Arc<egui::text::LayoutJob>,
+    size: Vec2,
+    galley: std::sync::Arc<egui::Galley>,
+    last_frame: u64,
+}
+
+#[derive(Clone, Default)]
+struct DiffuseGalleyCache(
+    std::sync::Arc<std::sync::Mutex<std::collections::HashMap<u64, Vec<DiffuseEntry>>>>,
+);
+
+fn diffuse_cache(ctx: &egui::Context) -> DiffuseGalleyCache {
+    ctx.data_mut(|data| {
+        data.get_temp_mut_or_default::<DiffuseGalleyCache>(egui::Id::new("privacy-diffuse-galley-cache"))
+            .clone()
+    })
+}
+
+fn job_signature(job: &egui::text::LayoutJob, size: Vec2) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    job.hash(&mut hasher);
+    size.x.to_bits().hash(&mut hasher);
+    size.y.to_bits().hash(&mut hasher);
+    hasher.finish()
+}
+
+fn diffuse_galley_for(
+    ui: &Ui,
+    galley: &std::sync::Arc<egui::Galley>,
+) -> std::sync::Arc<egui::Galley> {
+    let frame = ui.ctx().cumulative_frame_nr();
+    let sig = job_signature(&galley.job, galley.size());
+    let cache = diffuse_cache(ui.ctx());
+    {
+        let mut map = cache.0.lock().unwrap_or_else(|p| p.into_inner());
+        if let Some(bucket) = map.get_mut(&sig)
+            && let Some(entry) = bucket
+                .iter_mut()
+                .find(|e| e.size == galley.size() && *e.job == *galley.job)
+        {
+            entry.last_frame = frame;
+            return entry.galley.clone();
+        }
+    }
+
+    // Clone the galley and scale down vertex alpha on each row so glyphs are diffuse.
+    // Preserves transparent placeholder glyphs (e.g. for emojis) without forcing them
+    // into opaque solid boxes.
+    let mut diffuse = (**galley).clone();
+    const FACTOR: f32 = 0.15;
+    for placed in &mut diffuse.rows {
+        let row = std::sync::Arc::make_mut(&mut placed.row);
+        for vertex in &mut row.visuals.mesh.vertices {
+            if vertex.color.a() > 0 {
+                vertex.color = vertex.color.gamma_multiply(FACTOR);
+            }
+        }
+    }
+    let diffuse_arc = std::sync::Arc::new(diffuse);
+
+    let mut map = cache.0.lock().unwrap_or_else(|p| p.into_inner());
+    let bucket = map.entry(sig).or_default();
+    if let Some(entry) = bucket
+        .iter_mut()
+        .find(|e| e.size == galley.size() && *e.job == *galley.job)
+    {
+        entry.last_frame = frame;
+        return entry.galley.clone();
+    }
+    bucket.push(DiffuseEntry {
+        job: galley.job.clone(),
+        size: galley.size(),
+        galley: diffuse_arc.clone(),
+        last_frame: frame,
+    });
+    let total: usize = map.values().map(Vec::len).sum();
+    if total > MAX_DIFFUSE_GALLEYS {
+        let oldest = map
+            .iter()
+            .flat_map(|(k, v)| v.iter().enumerate().map(move |(i, e)| (e.last_frame, *k, i)))
+            .filter(|(f, _, _)| *f < frame)
+            .min_by_key(|(f, _, _)| *f);
+        if let Some((_, k, i)) = oldest {
+            if let Some(v) = map.get_mut(&k) {
+                v.swap_remove(i);
+                if v.is_empty() {
+                    map.remove(&k);
+                }
+            }
+        }
+    }
+    diffuse_arc
+}
+
+/// Paints text with a multi-pass offset diffuse blur.
+pub fn paint_pseudo_blur_galley(
+    ui: &Ui,
+    pos: egui::Pos2,
+    galley: std::sync::Arc<egui::Galley>,
+    fallback: Color32,
+) {
+    if galley.is_empty() {
+        return;
+    }
+
+    let diffuse_arc = diffuse_galley_for(ui, &galley);
+
+    // Radial offsets without a center sample at (0, 0) so no sharp glyph core remains.
+    const OFFSETS: [Vec2; 12] = [
+        // Inner ring (radius ~2.4px)
+        vec2(-2.4, 0.0),
+        vec2(2.4, 0.0),
+        vec2(0.0, -2.2),
+        vec2(0.0, 2.2),
+        // Outer ring (radius ~4.4px horizontal, ~3.4px vertical)
+        vec2(-4.4, 0.0),
+        vec2(4.4, 0.0),
+        vec2(-3.2, -2.4),
+        vec2(3.2, 2.4),
+        vec2(-3.2, 2.4),
+        vec2(3.2, -2.4),
+        vec2(0.0, -3.4),
+        vec2(0.0, 3.4),
+    ];
+
+    for offset in OFFSETS {
+        let shape = egui::epaint::TextShape::new(pos + offset, diffuse_arc.clone(), fallback);
+        ui.painter().add(shape);
+    }
+}
+
+/// A blurred texture for an emoji cluster, cached by cluster text.
+pub fn blurred_emoji_texture(ctx: &egui::Context, cluster: &str) -> Option<egui::TextureHandle> {
+    let key = format!("emoji-{cluster}");
+    let frame = ctx.cumulative_frame_nr();
+    let cache = blurred_cache(ctx);
+    {
+        let mut entries = cache.0.lock().ok()?;
+        if let Some(BlurEntry::Ready {
+            texture,
+            last_frame,
+            ..
+        }) = entries.get_mut(&key)
+        {
+            *last_frame = frame;
+            return Some(texture.clone());
+        }
+    }
+    let picture = crate::emoji::bundled().render(cluster, 32)?;
+    let img = image::RgbaImage::from_raw(
+        picture.size[0] as u32,
+        picture.size[1] as u32,
+        picture.rgba.to_vec(),
+    )?;
+    let thumb = image::imageops::resize(&img, 16, 16, image::imageops::FilterType::Triangle);
+    let blurred = image::imageops::blur(&thumb, 2.0);
+    let size = [blurred.width() as usize, blurred.height() as usize];
+    let color_image = egui::ColorImage::from_rgba_unmultiplied(size, &blurred);
+    let handle = ctx.load_texture(
+        format!("privacy-blurred-{key}"),
+        color_image,
+        egui::TextureOptions::LINEAR,
+    );
+    let mut entries = cache.0.lock().ok()?;
+    if let Some(BlurEntry::Ready {
+        texture,
+        last_frame,
+        ..
+    }) = entries.get_mut(&key)
+    {
+        *last_frame = frame;
+        return Some(texture.clone());
+    }
+    entries.insert(
+        key,
+        BlurEntry::Ready {
+            texture: handle.clone(),
+            original_size: vec2(picture.size[0] as f32, picture.size[1] as f32),
+            last_frame: frame,
+        },
+    );
+    trim_blurred_entries(&mut entries, frame);
+    Some(handle)
+}
+
+/// Paints emoji placeholders with a smooth blurred emoji texture.
+pub fn paint_blurred_emojis(
+    ui: &Ui,
+    galley: &egui::Galley,
+    origin: egui::Pos2,
+    placements: &[String],
+) {
+    if placements.is_empty() {
+        return;
+    }
+    for (rect, cluster) in crate::emoji::placeholder_rects(galley).zip(placements) {
+        let target_rect = rect.translate(origin.to_vec2());
+        if let Some(tex) = blurred_emoji_texture(ui.ctx(), cluster) {
+            egui::Image::from_texture(&tex)
+                .fit_to_exact_size(target_rect.size())
+                .paint_at(ui, target_rect);
+        } else {
+            ui.painter().circle_filled(
+                target_rect.center(),
+                target_rect.height() * 0.4,
+                ui.visuals().text_color().gamma_multiply(0.2),
+            );
+        }
     }
 }
 
@@ -256,6 +499,17 @@ pub fn rich_text(ui: &mut Ui, text: &str, font: egui::FontId, color: Color32) ->
     response
 }
 
+/// Allocates one truncated line painted with pseudo-blur.
+pub fn rich_text_blurred(ui: &mut Ui, text: &str, font: egui::FontId, color: Color32) -> egui::Response {
+    let width = ui.available_width().max(1.0);
+    let line = line(ui, text, font, color, width, 1);
+    let (rect, response) = ui.allocate_exact_size(line.size(), Sense::hover());
+    if ui.is_rect_visible(rect) {
+        line.paint_blurred(ui, rect.min, color);
+    }
+    response
+}
+
 /// Selectable version of [`rich_text`].
 pub fn selectable_rich_text(
     ui: &mut Ui,
@@ -305,6 +559,359 @@ pub fn file_image(ui: &Ui, path: &Path) -> egui::Image<'static> {
     egui::Image::new(uri)
 }
 
+const MAX_BLURRED_TEXTURES: usize = 256;
+const MAX_BLUR_DECODERS: usize = 4;
+const MAX_BLUR_IMAGE_SIDE: u32 = 4096;
+const MAX_BLUR_IMAGE_BYTES: u64 = 64 * 1024 * 1024;
+
+static BLUR_DECODING: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+struct BlurDecodeSlot;
+
+impl Drop for BlurDecodeSlot {
+    fn drop(&mut self) {
+        BLUR_DECODING.fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
+    }
+}
+
+enum BlurEntry {
+    Decoding,
+    Failed {
+        last_frame: u64,
+    },
+    Ready {
+        texture: egui::TextureHandle,
+        original_size: Vec2,
+        last_frame: u64,
+    },
+}
+
+impl BlurEntry {
+    fn last_frame(&self) -> u64 {
+        match self {
+            Self::Decoding => u64::MAX,
+            Self::Failed { last_frame } | Self::Ready { last_frame, .. } => *last_frame,
+        }
+    }
+}
+
+#[derive(Clone, Default)]
+struct BlurredImageCache(
+    std::sync::Arc<std::sync::Mutex<std::collections::HashMap<String, BlurEntry>>>,
+);
+
+type BlurDelivery = (String, Option<(egui::ColorImage, Vec2)>);
+
+#[derive(Clone, Default)]
+struct BlurredInbox(std::sync::Arc<std::sync::Mutex<Vec<BlurDelivery>>>);
+
+fn blurred_cache(ctx: &egui::Context) -> BlurredImageCache {
+    ctx.data_mut(|data| {
+        data.get_temp_mut_or_default::<BlurredImageCache>(egui::Id::new("privacy-blurred-image-cache"))
+            .clone()
+    })
+}
+
+fn blurred_inbox(ctx: &egui::Context) -> BlurredInbox {
+    ctx.data_mut(|data| {
+        data.get_temp_mut_or_default::<BlurredInbox>(egui::Id::new("privacy-blurred-inbox"))
+            .clone()
+    })
+}
+
+fn trim_blurred_entries(entries: &mut std::collections::HashMap<String, BlurEntry>, frame: u64) {
+    let over = entries.len().saturating_sub(MAX_BLURRED_TEXTURES);
+    if over == 0 {
+        return;
+    }
+    let mut candidates: Vec<(u64, String)> = entries
+        .iter()
+        .filter(|(_, entry)| !matches!(entry, BlurEntry::Decoding) && entry.last_frame() < frame)
+        .map(|(k, entry)| (entry.last_frame(), k.clone()))
+        .collect();
+    candidates.sort_unstable();
+    for (_, key) in candidates.into_iter().take(over) {
+        entries.remove(&key);
+    }
+}
+
+fn drain_blurred_inbox(ctx: &egui::Context) {
+    let inbox = blurred_inbox(ctx);
+    let deliveries: Vec<BlurDelivery> = {
+        let mut guard = inbox.0.lock().unwrap_or_else(|p| p.into_inner());
+        if guard.is_empty() {
+            return;
+        }
+        std::mem::take(&mut *guard)
+    };
+    let frame = ctx.cumulative_frame_nr();
+    let cache = blurred_cache(ctx);
+    let mut ready_uploads = Vec::with_capacity(deliveries.len());
+    for (key, payload) in deliveries {
+        match payload {
+            Some((color_image, original_size)) => {
+                let handle = ctx.load_texture(
+                    format!("privacy-blurred-{key}"),
+                    color_image,
+                    egui::TextureOptions::LINEAR,
+                );
+                ready_uploads.push((
+                    key,
+                    BlurEntry::Ready {
+                        texture: handle,
+                        original_size,
+                        last_frame: frame,
+                    },
+                ));
+            }
+            None => {
+                ready_uploads.push((key, BlurEntry::Failed { last_frame: frame }));
+            }
+        }
+    }
+    if let Ok(mut entries) = cache.0.lock() {
+        for (key, entry) in ready_uploads {
+            entries.insert(key, entry);
+        }
+        trim_blurred_entries(&mut entries, frame);
+    }
+}
+
+/// Drains finished background blur decodes and evicts least-recently-used
+/// blurred textures beyond the resident cap.
+pub fn sweep_blurred_cache(ctx: &egui::Context) {
+    drain_blurred_inbox(ctx);
+    let frame = ctx.cumulative_frame_nr();
+    let cache = blurred_cache(ctx);
+    if let Ok(mut entries) = cache.0.lock() {
+        trim_blurred_entries(&mut entries, frame);
+    }
+}
+
+fn image_limits() -> image::Limits {
+    let mut limits = image::Limits::default();
+    limits.max_image_width = Some(MAX_BLUR_IMAGE_SIDE);
+    limits.max_image_height = Some(MAX_BLUR_IMAGE_SIDE);
+    limits.max_alloc = Some(MAX_BLUR_IMAGE_BYTES);
+    limits
+}
+
+fn decode_dynamic_image_bytes(bytes: &[u8]) -> Option<image::DynamicImage> {
+    if bytes.len() as u64 > MAX_BLUR_IMAGE_BYTES {
+        return None;
+    }
+    let reader = image::ImageReader::new(std::io::Cursor::new(bytes))
+        .with_guessed_format()
+        .ok();
+    if let Some(mut reader) = reader {
+        reader.limits(image_limits());
+        if let Ok(img) = reader.decode() {
+            return Some(img);
+        }
+    }
+    let decoder = webp_animation::Decoder::new(bytes).ok()?;
+    let (w, h) = decoder.dimensions();
+    if w == 0 || h == 0 || w > MAX_BLUR_IMAGE_SIDE || h > MAX_BLUR_IMAGE_SIDE {
+        return None;
+    }
+    let frame = decoder.into_iter().next()?;
+    let rgba = image::RgbaImage::from_raw(w, h, frame.data().to_vec())?;
+    Some(image::DynamicImage::ImageRgba8(rgba))
+}
+
+fn decode_image_file_blurred(path: &Path) -> Option<(egui::ColorImage, Vec2)> {
+    let meta = std::fs::metadata(path).ok()?;
+    if meta.len() > MAX_BLUR_IMAGE_BYTES {
+        return None;
+    }
+    let img = if let Some(mut reader) = image::ImageReader::open(path)
+        .ok()
+        .and_then(|r| r.with_guessed_format().ok())
+    {
+        reader.limits(image_limits());
+        match reader.decode() {
+            Ok(img) => Some(img),
+            Err(_) => {
+                let bytes = std::fs::read(path).ok()?;
+                decode_dynamic_image_bytes(&bytes)
+            }
+        }
+    } else {
+        let bytes = std::fs::read(path).ok()?;
+        decode_dynamic_image_bytes(&bytes)
+    }?;
+    Some(make_blurred_color_image(img))
+}
+
+fn make_blurred_color_image(dynamic_img: image::DynamicImage) -> (egui::ColorImage, Vec2) {
+    let original_size = vec2(dynamic_img.width() as f32, dynamic_img.height() as f32);
+    let thumb = dynamic_img.thumbnail(24, 24);
+    let rgba = thumb.to_rgba8();
+    let blurred = image::imageops::blur(&rgba, 2.5);
+    let size = [blurred.width() as usize, blurred.height() as usize];
+    (
+        egui::ColorImage::from_rgba_unmultiplied(size, &blurred),
+        original_size,
+    )
+}
+
+/// A blurred low-res texture for `path` together with its original pixel dimensions,
+/// decoded off the UI thread (synchronously in tests) and cached by path string.
+pub fn blurred_image_texture_sized(
+    ctx: &egui::Context,
+    path: &Path,
+) -> Option<(egui::TextureHandle, Vec2)> {
+    drain_blurred_inbox(ctx);
+    let key = path.to_string_lossy();
+    let frame = ctx.cumulative_frame_nr();
+    let cache = blurred_cache(ctx);
+    {
+        let mut entries = cache.0.lock().ok()?;
+        match entries.get_mut(key.as_ref()) {
+            Some(BlurEntry::Ready {
+                texture,
+                original_size,
+                last_frame,
+            }) => {
+                *last_frame = frame;
+                return Some((texture.clone(), *original_size));
+            }
+            Some(BlurEntry::Decoding) => return None,
+            Some(BlurEntry::Failed { last_frame }) => {
+                *last_frame = frame;
+                return None;
+            }
+            None => {}
+        }
+        if !cfg!(test) {
+            if BLUR_DECODING.load(std::sync::atomic::Ordering::Acquire) >= MAX_BLUR_DECODERS {
+                return None;
+            }
+            entries.insert(key.as_ref().to_owned(), BlurEntry::Decoding);
+        }
+    }
+
+    if cfg!(test) {
+        let result = decode_image_file_blurred(path);
+        let entry = match result {
+            Some((color_image, original_size)) => {
+                let handle = ctx.load_texture(
+                    format!("privacy-blurred-{key}"),
+                    color_image,
+                    egui::TextureOptions::LINEAR,
+                );
+                BlurEntry::Ready {
+                    texture: handle.clone(),
+                    original_size,
+                    last_frame: frame,
+                }
+            }
+            None => BlurEntry::Failed { last_frame: frame },
+        };
+        let mut entries = cache.0.lock().ok()?;
+        let ret = match &entry {
+            BlurEntry::Ready {
+                texture,
+                original_size,
+                ..
+            } => Some((texture.clone(), *original_size)),
+            _ => None,
+        };
+        entries.insert(key.into_owned(), entry);
+        trim_blurred_entries(&mut entries, frame);
+        return ret;
+    }
+
+    let key_owned = key.into_owned();
+    let path_owned = path.to_path_buf();
+    let inbox = blurred_inbox(ctx);
+    let ctx_clone = ctx.clone();
+    BLUR_DECODING.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+    let spawned = std::thread::Builder::new()
+        .name("privacy-blur-decode".into())
+        .spawn(move || {
+            let _slot = BlurDecodeSlot;
+            let decoded = decode_image_file_blurred(&path_owned);
+            if let Ok(mut guard) = inbox.0.lock() {
+                guard.push((key_owned, decoded));
+            }
+            ctx_clone.request_repaint();
+        });
+    if spawned.is_err() {
+        BLUR_DECODING.fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
+        if let Ok(mut entries) = cache.0.lock() {
+            entries.remove(path.to_string_lossy().as_ref());
+        }
+    }
+    None
+}
+
+/// A blurred low-res texture for `path`, cached by path string.
+pub fn blurred_image_texture(ctx: &egui::Context, path: &Path) -> Option<egui::TextureHandle> {
+    blurred_image_texture_sized(ctx, path).map(|(texture, _)| texture)
+}
+
+/// A blurred low-res texture for in-memory bytes, cached by `key`.
+pub fn blurred_bytes_texture(
+    ctx: &egui::Context,
+    key: &str,
+    bytes: &[u8],
+) -> Option<egui::TextureHandle> {
+    let frame = ctx.cumulative_frame_nr();
+    let cache = blurred_cache(ctx);
+    {
+        let mut entries = cache.0.lock().ok()?;
+        match entries.get_mut(key) {
+            Some(BlurEntry::Ready {
+                texture,
+                last_frame,
+                ..
+            }) => {
+                *last_frame = frame;
+                return Some(texture.clone());
+            }
+            Some(BlurEntry::Failed { last_frame }) => {
+                *last_frame = frame;
+                return None;
+            }
+            Some(BlurEntry::Decoding) | None => {}
+        }
+    }
+    let Some(img) = decode_dynamic_image_bytes(bytes) else {
+        if let Ok(mut entries) = cache.0.lock() {
+            entries.insert(key.to_owned(), BlurEntry::Failed { last_frame: frame });
+            trim_blurred_entries(&mut entries, frame);
+        }
+        return None;
+    };
+    let (color_image, original_size) = make_blurred_color_image(img);
+    let handle = ctx.load_texture(
+        format!("privacy-blurred-{key}"),
+        color_image,
+        egui::TextureOptions::LINEAR,
+    );
+    let mut entries = cache.0.lock().ok()?;
+    if let Some(BlurEntry::Ready {
+        texture,
+        last_frame,
+        ..
+    }) = entries.get_mut(key)
+    {
+        *last_frame = frame;
+        return Some(texture.clone());
+    }
+    entries.insert(
+        key.to_owned(),
+        BlurEntry::Ready {
+            texture: handle.clone(),
+            original_size,
+            last_frame: frame,
+        },
+    );
+    trim_blurred_entries(&mut entries, frame);
+    Some(handle)
+}
+
 /// Round profile picture, or id-colored initials when no picture is available.
 pub fn avatar(
     ui: &mut Ui,
@@ -317,6 +924,22 @@ pub fn avatar(
     let (rect, response) = ui.allocate_exact_size(Vec2::splat(size), Sense::hover());
     if ui.is_rect_visible(rect) {
         paint_avatar(ui, palette, rect, name, id, picture);
+    }
+    response
+}
+
+/// Round profile picture drawn with pseudo-blur.
+pub fn avatar_blurred(
+    ui: &mut Ui,
+    palette: &Palette,
+    name: &str,
+    id: &str,
+    size: f32,
+    picture: Option<&Path>,
+) -> egui::Response {
+    let (rect, response) = ui.allocate_exact_size(Vec2::splat(size), Sense::hover());
+    if ui.is_rect_visible(rect) {
+        paint_avatar_blurred(ui, palette, rect, name, id, picture);
     }
     response
 }
@@ -380,6 +1003,44 @@ pub fn paint_avatar(
                 theme::semibold(size * 0.38),
                 Color32::WHITE,
             );
+        }
+    }
+}
+
+/// Paints a profile picture with a frosted blur effect.
+pub fn paint_avatar_blurred(
+    ui: &Ui,
+    palette: &Palette,
+    rect: Rect,
+    name: &str,
+    id: &str,
+    picture: Option<&Path>,
+) {
+    let size = rect.width();
+    let mut painted = false;
+    if let Some(picture) = picture {
+        if let Some(texture) = blurred_image_texture(ui.ctx(), picture) {
+            let image = egui::Image::from_texture(&texture)
+                .fit_to_exact_size(Vec2::splat(size))
+                .corner_radius(size / 2.0);
+            image.paint_at(ui, rect);
+            painted = true;
+        }
+    }
+    if !painted {
+        let fill = palette.avatar(crate::util::hue(id));
+        ui.painter().circle_filled(rect.center(), size / 2.0, fill);
+        if crate::model::ChatKind::from_id(id) == crate::model::ChatKind::Group {
+            theme::paint_icon(ui, Icon::Users, rect, size * 0.5, Color32::WHITE.gamma_multiply(0.35));
+        } else {
+            let initials = crate::util::initials(name);
+            let galley = ui.painter().layout_no_wrap(
+                initials.to_string(),
+                theme::semibold(size * 0.38),
+                Color32::WHITE,
+            );
+            let text_pos = rect.center() - galley.size() / 2.0;
+            paint_pseudo_blur_galley(ui, text_pos, galley, Color32::WHITE);
         }
     }
 }
@@ -2987,5 +3648,75 @@ mod tests {
         assert!(off_outline > 0.0, "the off track is outlined");
         assert_eq!(on_outline, 0.0, "the on track is filled, not outlined");
         assert!(on_knob > off_knob, "the knob grows when on");
+    }
+
+    #[test]
+    fn blurred_image_and_bytes_texture_caches() {
+        let ctx = egui::Context::default();
+        let mut png = Vec::new();
+        let img = image::RgbaImage::from_pixel(100, 100, image::Rgba([255, 0, 0, 255]));
+        img.write_to(
+            &mut std::io::Cursor::new(&mut png),
+            image::ImageFormat::Png,
+        )
+        .expect("encodes png");
+
+        let handle1 = blurred_bytes_texture(&ctx, "test-bytes", &png).expect("blurs bytes");
+        let handle2 = blurred_bytes_texture(&ctx, "test-bytes", &png).expect("retrieves from cache");
+        assert_eq!(handle1.id(), handle2.id());
+    }
+
+    #[test]
+    fn blurred_image_texture_sized_returns_original_dimensions_and_caps_cache() {
+        let ctx = egui::Context::default();
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join("sample.png");
+        let img = image::RgbaImage::from_pixel(120, 80, image::Rgba([0, 128, 255, 255]));
+        img.save(&path).expect("saves png");
+
+        let (tex1, size1) = blurred_image_texture_sized(&ctx, &path).expect("blurs file");
+        let (tex2, size2) = blurred_image_texture_sized(&ctx, &path).expect("hits cache");
+        assert_eq!(tex1.id(), tex2.id());
+        assert_eq!(size1, vec2(120.0, 80.0));
+        assert_eq!(size2, size1);
+
+        let mut png = Vec::new();
+        img.write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+            .expect("encodes png");
+        for i in 0..(MAX_BLURRED_TEXTURES + 10) {
+            let mut out = ctx.run_ui(egui::RawInput::default(), |_| {});
+            out.textures_delta.clear();
+            let _ = blurred_bytes_texture(&ctx, &format!("cap-{i}"), &png);
+        }
+        sweep_blurred_cache(&ctx);
+        let cache = blurred_cache(&ctx);
+        let len = cache.0.lock().expect("lock").len();
+        assert!(
+            len <= MAX_BLURRED_TEXTURES,
+            "cache should stay bounded ({len} <= {MAX_BLURRED_TEXTURES})"
+        );
+    }
+
+    #[test]
+    fn diffuse_galley_is_cached_across_frames() {
+        let ctx = egui::Context::default();
+        crate::theme::install(&ctx);
+        let mut ptrs = Vec::new();
+        for _ in 0..2 {
+            let mut out = ctx.run_ui(egui::RawInput::default(), |ui| {
+                let line = line(
+                    ui,
+                    "Confidential message",
+                    theme::regular(14.0),
+                    Color32::WHITE,
+                    200.0,
+                    1,
+                );
+                let diffuse = diffuse_galley_for(ui, &line.galley);
+                ptrs.push(std::sync::Arc::as_ptr(&diffuse) as usize);
+            });
+            out.textures_delta.clear();
+        }
+        assert_eq!(ptrs[0], ptrs[1], "diffuse galley should be reused across frames");
     }
 }

@@ -2714,6 +2714,8 @@ pub enum Action {
         blocked: bool,
     },
     Open(Page),
+    /// Toggles the privacy blur overlay across chat messages, previews and avatars.
+    TogglePrivacyBlur,
     /// Opens settings, or closes them when they are already showing.
     ToggleSettings,
     /// Steps back to the previously visited page, chat, or dialog, as a

@@ -106,6 +106,7 @@ pub fn handle(app: &mut App, ctx: &egui::Context) {
             key(Modifiers::COMMAND, Key::E, archive);
         }
         key(Modifiers::COMMAND, Key::B, Action::ToggleSidebar);
+        key(Modifiers::ALT, Key::X, Action::TogglePrivacyBlur);
         key(Modifiers::COMMAND, Key::Comma, Action::ToggleSettings);
         key(Modifiers::COMMAND, Key::Q, Action::Quit);
         key(Modifiers::COMMAND, Key::W, Action::CloseWindow);
@@ -1075,6 +1076,7 @@ const DELETE_FOR_EVERYONE_KEYS: &str = if cfg!(target_os = "macos") {
 
 /// Shortcuts shown in the help dialog.
 pub const SHORTCUTS: &[(&str, &str)] = &[
+    ("Alt+X", "Toggle privacy blur"),
     ("Ctrl+K / Ctrl+Shift+F", "Search chats"),
     ("Ctrl+F", "Search the open chat or the settings"),
     (
@@ -1190,6 +1192,27 @@ mod tests {
         }
         app.open_chat = Some(chat.clone());
         (root, app, chat)
+    }
+
+    #[test]
+    fn alt_x_toggles_privacy_blur() {
+        let (_root, mut app, _chat) = app_with(vec![]);
+        let ctx = egui::Context::default();
+        let mut output = ctx.run_ui(
+            egui::RawInput {
+                events: vec![egui::Event::Key {
+                    key: Key::X,
+                    physical_key: None,
+                    pressed: true,
+                    repeat: false,
+                    modifiers: Modifiers::ALT,
+                }],
+                ..Default::default()
+            },
+            |ui| handle(&mut app, ui.ctx()),
+        );
+        output.textures_delta.clear();
+        assert_eq!(app.actions, [Action::TogglePrivacyBlur]);
     }
 
     /// G takes no key from a message that replies to nothing.

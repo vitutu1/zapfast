@@ -284,9 +284,55 @@ fn new_call_header(app: &mut App, ui: &mut egui::Ui, title: f32, buttons: f32) {
 /// The search field under the header's first row, and the filter chips
 /// under it. The Calls tab searches its own list by name or number, and its
 /// chips pick every call or the missed ones.
-fn search_and_filters(app: &mut App, ui: &mut egui::Ui) {
+fn search_with_privacy_toggle(
+    app: &mut App,
+    ui: &mut egui::Ui,
+    id: &str,
+    text: &mut String,
+    hint: &str,
+) -> egui::Response {
     let palette = app.palette;
     let width = ui.available_width();
+    let privacy_button_width = HEADER_ICON + theme::ICON_BUTTON_PAD;
+    let spacing = ui.spacing().item_spacing.x;
+    let field_width = (width - privacy_button_width - spacing).max(60.0);
+    let (privacy_icon, privacy_color, privacy_tooltip) = if app.privacy_blur {
+        (
+            Icon::EyeOff,
+            palette.accent,
+            crate::i18n::gettext(app.locale, "Disable privacy blur (Alt+X)"),
+        )
+    } else {
+        (
+            Icon::Eye,
+            palette.secondary,
+            crate::i18n::gettext(app.locale, "Enable privacy blur (Alt+X)"),
+        )
+    };
+
+    let mut response = None;
+    ui.horizontal(|ui| {
+        response = Some(
+            widgets::search_field(ui, &palette, egui::Id::new(id), text, hint, field_width)
+                .tab_stop(Stop::Search),
+        );
+        if theme::icon_button(
+            ui,
+            privacy_icon,
+            HEADER_ICON,
+            privacy_color,
+            palette.text,
+            privacy_tooltip.as_ref(),
+        )
+        .clicked()
+        {
+            app.actions.push(Action::TogglePrivacyBlur);
+        }
+    });
+    response.expect("search response")
+}
+
+fn search_and_filters(app: &mut App, ui: &mut egui::Ui) {
     if app.page == Page::Calls {
         let hint = crate::i18n::gettext(app.locale, "Search name or number");
         let (id, mut text) = if app.new_call {
@@ -294,15 +340,7 @@ fn search_and_filters(app: &mut App, ui: &mut egui::Ui) {
         } else {
             ("calls-search", app.calls_search.clone())
         };
-        let response = widgets::search_field(
-            ui,
-            &palette,
-            egui::Id::new(id),
-            &mut text,
-            hint.as_ref(),
-            width,
-        )
-        .tab_stop(Stop::Search);
+        let response = search_with_privacy_toggle(app, ui, id, &mut text, hint.as_ref());
         if app.new_call {
             // The list opens ready for a name, as New chat does.
             if ui.memory(|memory| memory.focused().is_none()) && ui.is_enabled() {
@@ -316,15 +354,8 @@ fn search_and_filters(app: &mut App, ui: &mut egui::Ui) {
         return;
     }
     let mut text = app.search.clone();
-    let response = widgets::search_field(
-        ui,
-        &palette,
-        egui::Id::new("chat-search"),
-        &mut text,
-        crate::i18n::gettext(app.locale, "Search").as_ref(),
-        width,
-    )
-    .tab_stop(Stop::Search);
+    let hint = crate::i18n::gettext(app.locale, "Search");
+    let response = search_with_privacy_toggle(app, ui, "chat-search", &mut text, hint.as_ref());
     if text != app.search {
         app.actions.push(Action::Search(text));
     }
@@ -1307,6 +1338,8 @@ fn hit_row(app: &mut App, ui: &mut egui::Ui, hit: &Message) {
         vec2(ui.available_width(), theme::ROW_HEIGHT),
         Sense::click(),
     );
+    let row_hovered = response.hovered() || widgets::rect_hovered(ui, rect, 0.0);
+    let row_blurred = app.privacy_blur && !row_hovered;
     theme::reveal_focus(&response);
     if ui.is_rect_visible(rect) {
         if response.hovered() {
@@ -1315,14 +1348,25 @@ fn hit_row(app: &mut App, ui: &mut egui::Ui, hit: &Message) {
         let avatar_rect =
             Rect::from_center_size(pos2(rect.left() + 38.0, rect.center().y), Vec2::splat(48.0));
         let picture = app.avatar(&hit.chat);
-        widgets::paint_avatar(
-            ui,
-            &palette,
-            avatar_rect,
-            &title,
-            &hit.chat,
-            picture.as_deref(),
-        );
+        if row_blurred {
+            widgets::paint_avatar_blurred(
+                ui,
+                &palette,
+                avatar_rect,
+                &title,
+                &hit.chat,
+                picture.as_deref(),
+            );
+        } else {
+            widgets::paint_avatar(
+                ui,
+                &palette,
+                avatar_rect,
+                &title,
+                &hit.chat,
+                picture.as_deref(),
+            );
+        }
         let left = rect.left() + 76.0;
         let right = rect.right() - 14.0;
         let stamp_galley = ui.painter().layout_no_wrap(
@@ -1338,7 +1382,11 @@ fn hit_row(app: &mut App, ui: &mut egui::Ui, hit: &Message) {
         );
         let name_width = (right - stamp_galley.size().x - 8.0 - left).max(0.0);
         let name = widgets::line(ui, &title, theme::medium(14.5), palette.text, name_width, 1);
-        name.paint(ui, pos2(left, name_top), palette.text);
+        if row_blurred {
+            name.paint_blurred(ui, pos2(left, name_top), palette.text);
+        } else {
+            name.paint(ui, pos2(left, name_top), palette.text);
+        }
         // Show the sender for group messages.
         let line_y = rect.top() + 38.0;
         let mut x = left;
@@ -1351,7 +1399,11 @@ fn hit_row(app: &mut App, ui: &mut egui::Ui, hit: &Message) {
                 (right - x) * 0.5,
                 1,
             );
-            who.paint(ui, pos2(x, line_y), palette.dim);
+            if row_blurred {
+                who.paint_blurred(ui, pos2(x, line_y), palette.dim);
+            } else {
+                who.paint(ui, pos2(x, line_y), palette.dim);
+            }
             x += who.size().x;
         } else if crate::model::ChatKind::from_id(&hit.chat) == crate::model::ChatKind::Group {
             let sender = app.display_name_or(&hit.sender, hit.sender_name.as_deref());
@@ -1364,7 +1416,11 @@ fn hit_row(app: &mut App, ui: &mut egui::Ui, hit: &Message) {
                 (right - x) * 0.5,
                 1,
             );
-            who.paint(ui, pos2(x, line_y), palette.dim);
+            if row_blurred {
+                who.paint_blurred(ui, pos2(x, line_y), palette.dim);
+            } else {
+                who.paint(ui, pos2(x, line_y), palette.dim);
+            }
             x += who.size().x;
         }
         let words = widgets::line(
@@ -1375,7 +1431,11 @@ fn hit_row(app: &mut App, ui: &mut egui::Ui, hit: &Message) {
             (right - x).max(0.0),
             1,
         );
-        words.paint(ui, pos2(x, line_y), palette.dim);
+        if row_blurred {
+            words.paint_blurred(ui, pos2(x, line_y), palette.dim);
+        } else {
+            words.paint(ui, pos2(x, line_y), palette.dim);
+        }
     }
     let response = response.on_hover_cursor(egui::CursorIcon::PointingHand);
     if response.clicked() {
@@ -1492,6 +1552,8 @@ fn person_row(
         ui.ctx().data_mut(|data| data.remove::<String>(revealed));
     }
     if ui.is_rect_visible(rect) {
+        let row_hovered = response.hovered() || widgets::rect_hovered(ui, rect, 0.0);
+        let row_blurred = app.privacy_blur && !row_hovered;
         if selected {
             widgets::row_highlight(ui, &palette, rect, palette.surface_active);
         } else if response.hovered() {
@@ -1500,7 +1562,11 @@ fn person_row(
         let avatar_rect =
             Rect::from_center_size(pos2(rect.left() + 38.0, rect.center().y), Vec2::splat(48.0));
         let picture = app.avatar(id);
-        widgets::paint_avatar(ui, &palette, avatar_rect, name, id, picture.as_deref());
+        if row_blurred {
+            widgets::paint_avatar_blurred(ui, &palette, avatar_rect, name, id, picture.as_deref());
+        } else {
+            widgets::paint_avatar(ui, &palette, avatar_rect, name, id, picture.as_deref());
+        }
         let left = rect.left() + 76.0;
         let name_line = widgets::line(
             ui,
@@ -1510,7 +1576,11 @@ fn person_row(
             rect.right() - 14.0 - left,
             1,
         );
-        name_line.paint(ui, pos2(left, rect.top() + 14.0), palette.text);
+        if row_blurred {
+            name_line.paint_blurred(ui, pos2(left, rect.top() + 14.0), palette.text);
+        } else {
+            name_line.paint(ui, pos2(left, rect.top() + 14.0), palette.text);
+        }
         if let Some(detail) = detail {
             let phone_line = widgets::line(
                 ui,
@@ -1520,7 +1590,11 @@ fn person_row(
                 rect.right() - 14.0 - left,
                 1,
             );
-            phone_line.paint(ui, pos2(left, rect.top() + 38.0), palette.dim);
+            if row_blurred {
+                phone_line.paint_blurred(ui, pos2(left, rect.top() + 38.0), palette.dim);
+            } else {
+                phone_line.paint(ui, pos2(left, rect.top() + 38.0), palette.dim);
+            }
         }
     }
     response.on_hover_cursor(egui::CursorIcon::PointingHand)
@@ -1560,17 +1634,30 @@ fn row(app: &mut App, ui: &mut egui::Ui, chat: &Chat) -> egui::Response {
         } else if response.hovered() {
             widgets::row_highlight(ui, &palette, rect, palette.surface_hover);
         }
+        let row_hovered = response.hovered() || widgets::rect_hovered(ui, rect, 0.0);
+        let row_blurred = app.privacy_blur && !row_hovered;
         let avatar_rect =
             Rect::from_center_size(pos2(rect.left() + 38.0, rect.center().y), Vec2::splat(48.0));
         let picture = app.avatar(&chat.id);
-        widgets::paint_avatar(
-            ui,
-            &palette,
-            avatar_rect,
-            &title,
-            &chat.id,
-            picture.as_deref(),
-        );
+        if row_blurred {
+            widgets::paint_avatar_blurred(
+                ui,
+                &palette,
+                avatar_rect,
+                &title,
+                &chat.id,
+                picture.as_deref(),
+            );
+        } else {
+            widgets::paint_avatar(
+                ui,
+                &palette,
+                avatar_rect,
+                &title,
+                &chat.id,
+                picture.as_deref(),
+            );
+        }
         if chat.disappearing_timer().is_some() {
             widgets::paint_disappearing_badge(ui, &palette, avatar_rect);
         }
@@ -1592,11 +1679,20 @@ fn row(app: &mut App, ui: &mut egui::Ui, chat: &Chat) -> egui::Response {
             .painter()
             .layout_no_wrap(stamp, theme::regular(11.5), stamp_color);
         let name_top = rect.top() + 14.0;
-        ui.painter().galley(
-            pos2(right - stamp_galley.size().x, name_top + 1.0),
-            stamp_galley.clone(),
-            stamp_color,
-        );
+        if row_blurred {
+            widgets::paint_pseudo_blur_galley(
+                ui,
+                pos2(right - stamp_galley.size().x, name_top + 1.0),
+                stamp_galley.clone(),
+                stamp_color,
+            );
+        } else {
+            ui.painter().galley(
+                pos2(right - stamp_galley.size().x, name_top + 1.0),
+                stamp_galley.clone(),
+                stamp_color,
+            );
+        }
         let name_width = (right - stamp_galley.size().x - 8.0 - left).max(0.0);
         let name_font = if unread {
             theme::semibold(14.5)
@@ -1604,7 +1700,11 @@ fn row(app: &mut App, ui: &mut egui::Ui, chat: &Chat) -> egui::Response {
             theme::medium(14.5)
         };
         let name = widgets::line(ui, &title, name_font, palette.text, name_width, 1);
-        name.paint(ui, pos2(left, name_top), palette.text);
+        if row_blurred {
+            name.paint_blurred(ui, pos2(left, name_top), palette.text);
+        } else {
+            name.paint(ui, pos2(left, name_top), palette.text);
+        }
 
         // Leave room for badges beside the latest-message preview.
         let mut badge_right = right;
@@ -1679,7 +1779,11 @@ fn row(app: &mut App, ui: &mut egui::Ui, chat: &Chat) -> egui::Response {
                 1,
             );
             let width = label.size().x;
-            label.paint(ui, pos2(x, line_y), palette.accent);
+            if row_blurred {
+                label.paint_blurred(ui, pos2(x, line_y), palette.accent);
+            } else {
+                label.paint(ui, pos2(x, line_y), palette.accent);
+            }
             x += width;
             widgets::line(
                 ui,
@@ -1719,7 +1823,11 @@ fn row(app: &mut App, ui: &mut egui::Ui, chat: &Chat) -> egui::Response {
                     1,
                 );
                 let width = sender.size().x;
-                sender.paint(ui, pos2(x, line_y), preview_color);
+                if row_blurred {
+                    sender.paint_blurred(ui, pos2(x, line_y), preview_color);
+                } else {
+                    sender.paint(ui, pos2(x, line_y), preview_color);
+                }
                 x += width;
             }
             let words = widgets::line(
@@ -1746,10 +1854,16 @@ fn row(app: &mut App, ui: &mut egui::Ui, chat: &Chat) -> egui::Response {
         } else {
             widgets::line(ui, "", theme::regular(13.0), preview_color, 1.0, 1)
         };
-        preview.paint(ui, pos2(x, line_y), preview_color);
+        if row_blurred {
+            preview.paint_blurred(ui, pos2(x, line_y), preview_color);
+        } else {
+            preview.paint(ui, pos2(x, line_y), preview_color);
+        }
     }
     let response = response.on_hover_cursor(egui::CursorIcon::PointingHand);
-    if let Some((area, prefix, full)) = full_preview {
+    if let Some((area, prefix, full)) = full_preview
+        && !app.privacy_blur
+    {
         full_preview_tooltip(app, ui, &chat.id, area, &prefix, &full);
     }
     if response.clicked() {

@@ -13,7 +13,7 @@
 use egui::text::LayoutJob;
 use egui::{Pos2, Rect, TextFormat};
 
-pub use fastframe_emoji::{PLACEHOLDER, only_emoji};
+pub use fastframe_emoji::{PLACEHOLDER, only_emoji, placeholder_rects};
 
 /// Noto Color Emoji, behind the platform's font.
 const BUNDLED: &[u8] = include_bytes!("../assets/fonts/NotoColorEmoji.ttf");
@@ -114,17 +114,21 @@ pub fn paint(ui: &egui::Ui, galley: &egui::Galley, origin: Pos2, placements: &[S
     fastframe_emoji::paint(ui, galley, origin, placements);
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// The bundled font alone, as a Mac or Windows machine falls back to it.
-    fn bundled() -> fastframe_emoji::Emoji {
+/// The bundled font alone, as a Mac or Windows machine falls back to it.
+pub fn bundled() -> &'static fastframe_emoji::Emoji {
+    static BUNDLED_EMOJI: std::sync::OnceLock<fastframe_emoji::Emoji> =
+        std::sync::OnceLock::new();
+    BUNDLED_EMOJI.get_or_init(|| {
         fastframe_emoji::EmojiSetup::default()
             .system(false)
             .bundled(BUNDLED)
             .load()
-    }
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
 
     #[test]
     fn the_bundled_font_renders_colour_emoji() {
