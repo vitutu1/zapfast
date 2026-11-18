@@ -498,6 +498,12 @@ fn header(app: &mut App, ui: &mut egui::Ui, chat: &Chat) -> Rect {
                 // On a vibrant window the name and the buttons sit on glass
                 // pills, drawn beneath them once they are measured.
                 let name_pill = ui.painter().add(egui::Shape::Noop);
+                let header_info_id = ui.id().with("chat-header-info");
+                let prev_block_rect = ui.ctx().data(|d| d.get_temp::<Rect>(header_info_id));
+                let header_hovered = prev_block_rect.is_some_and(|r| {
+                    ui.input(|i| i.pointer.hover_pos().is_some_and(|pos| r.contains(pos)))
+                });
+                let header_blurred = app.privacy_blur && !header_hovered;
                 let mut text = Rect::NOTHING;
                 let mut avatar = Rect::NOTHING;
                 // Treat the avatar, name, and subtitle as one info button.
@@ -511,14 +517,25 @@ fn header(app: &mut App, ui: &mut egui::Ui, chat: &Chat) -> Rect {
                             ),
                             Layout::left_to_right(Align::Center),
                             |ui| {
-                                let avatar_response = widgets::avatar(
-                                    ui,
-                                    &palette,
-                                    &title,
-                                    &chat.id,
-                                    40.0,
-                                    picture.as_deref(),
-                                );
+                                let avatar_response = if header_blurred {
+                                    widgets::avatar_blurred(
+                                        ui,
+                                        &palette,
+                                        &title,
+                                        &chat.id,
+                                        40.0,
+                                        picture.as_deref(),
+                                    )
+                                } else {
+                                    widgets::avatar(
+                                        ui,
+                                        &palette,
+                                        &title,
+                                        &chat.id,
+                                        40.0,
+                                        picture.as_deref(),
+                                    )
+                                };
                                 avatar = avatar_response.rect;
                                 if chat.disappearing_timer().is_some() {
                                     widgets::paint_disappearing_badge(
@@ -549,18 +566,33 @@ fn header(app: &mut App, ui: &mut egui::Ui, chat: &Chat) -> Rect {
                                             vec2(width, 40.0),
                                             Layout::left_to_right(Align::Center),
                                             |ui| {
-                                                text = widgets::rich_text(
-                                                    ui,
-                                                    &title,
-                                                    // Lighter on glass, as Apple's.
-                                                    if palette.vibrant() {
-                                                        theme::medium(15.0)
-                                                    } else {
-                                                        theme::semibold(17.0)
-                                                    },
-                                                    palette.text,
-                                                )
-                                                .rect;
+                                                text = if header_blurred {
+                                                    widgets::rich_text_blurred(
+                                                        ui,
+                                                        &title,
+                                                        // Lighter on glass, as Apple's.
+                                                        if palette.vibrant() {
+                                                            theme::medium(15.0)
+                                                        } else {
+                                                            theme::semibold(17.0)
+                                                        },
+                                                        palette.text,
+                                                    )
+                                                    .rect
+                                                } else {
+                                                    widgets::rich_text(
+                                                        ui,
+                                                        &title,
+                                                        // Lighter on glass, as Apple's.
+                                                        if palette.vibrant() {
+                                                            theme::medium(15.0)
+                                                        } else {
+                                                            theme::semibold(17.0)
+                                                        },
+                                                        palette.text,
+                                                    )
+                                                    .rect
+                                                };
                                             },
                                         );
                                     } else {
@@ -577,21 +609,49 @@ fn header(app: &mut App, ui: &mut egui::Ui, chat: &Chat) -> Rect {
                                             ),
                                             Layout::top_down(Align::Min),
                                             |ui| {
-                                                text = widgets::rich_text(
-                                                    ui,
-                                                    &title,
-                                                    theme::semibold(if palette.vibrant() {
-                                                        14.0
-                                                    } else {
-                                                        15.0
-                                                    }),
-                                                    palette.text,
-                                                )
-                                                .rect;
+                                                text = if header_blurred {
+                                                    widgets::rich_text_blurred(
+                                                        ui,
+                                                        &title,
+                                                        theme::semibold(if palette.vibrant() {
+                                                            14.0
+                                                        } else {
+                                                            15.0
+                                                        }),
+                                                        palette.text,
+                                                    )
+                                                    .rect
+                                                } else {
+                                                    widgets::rich_text(
+                                                        ui,
+                                                        &title,
+                                                        theme::semibold(if palette.vibrant() {
+                                                            14.0
+                                                        } else {
+                                                            15.0
+                                                        }),
+                                                        palette.text,
+                                                    )
+                                                    .rect
+                                                };
                                                 ui.with_layout(
                                                     Layout::bottom_up(Align::Min),
                                                     |ui| {
-                                                        text = text.union(
+                                                        let sub_rect = if header_blurred {
+                                                            widgets::rich_text_blurred(
+                                                                ui,
+                                                                &subtitle,
+                                                                theme::regular(
+                                                                    if palette.vibrant() {
+                                                                        11.5
+                                                                    } else {
+                                                                        12.5
+                                                                    },
+                                                                ),
+                                                                color,
+                                                            )
+                                                            .rect
+                                                        } else {
                                                             widgets::rich_text(
                                                                 ui,
                                                                 &subtitle,
@@ -604,8 +664,9 @@ fn header(app: &mut App, ui: &mut egui::Ui, chat: &Chat) -> Rect {
                                                                 ),
                                                                 color,
                                                             )
-                                                            .rect,
-                                                        );
+                                                            .rect
+                                                        };
+                                                        text = text.union(sub_rect);
                                                     },
                                                 );
                                             },
@@ -636,8 +697,9 @@ fn header(app: &mut App, ui: &mut egui::Ui, chat: &Chat) -> Rect {
                         .set(name_pill, glass(&palette, glass_rect, NAME_GLASS_RADIUS));
                 }
                 let block = ui
-                    .interact(block.rect, ui.id().with("chat-header-info"), Sense::click())
+                    .interact(block.rect, header_info_id, Sense::click())
                     .on_hover_cursor(egui::CursorIcon::PointingHand);
+                ui.ctx().data_mut(|d| d.insert_temp(header_info_id, block.rect));
                 if block.clicked() {
                     app.actions.push(Action::OpenInfo(chat.id.clone()));
                 }
@@ -1810,9 +1872,14 @@ fn composer(app: &mut App, ui: &mut egui::Ui, chat: &Chat, review_send: Option<b
                                 // Keep emoji in the buffer so character offsets match, then
                                 // paint their color bitmaps over the transparent glyphs.
                                 let mut clusters: Vec<(usize, usize, String)> = Vec::new();
+                                let composer_rect_id = id.with("composer_rect");
+                                let prev_composer_rect = ui.ctx().data(|data| data.get_temp::<Rect>(composer_rect_id));
+                                let composer_hovered = prev_composer_rect
+                                    .is_some_and(|r| widgets::rect_hovered(ui, r, 2.0));
+                                let composer_blurred = app.privacy_blur && !has_focus && !composer_hovered && !app.composer.is_empty();
                                 let format = egui::TextFormat::simple(
                                     theme::regular(BODY_SIZE),
-                                    palette.text,
+                                    if composer_blurred { Color32::TRANSPARENT } else { palette.text },
                                 );
                                 let composer_rtl = crate::bidi::base_rtl(&app.composer);
                                 let mut layouter = |ui: &egui::Ui,
@@ -1876,20 +1943,31 @@ fn composer(app: &mut App, ui: &mut egui::Ui, chat: &Chat, review_send: Option<b
                                     output.cursor_range = Some(range);
                                     egui::TextEdit::store_state(ui.ctx(), id, output.state.clone());
                                 }
-                                for (start, length, cluster) in &clusters {
-                                    let Some(bounds) = crate::bidi::char_bounds(
-                                        &output.galley,
-                                        *start,
-                                        start + length,
-                                    ) else {
-                                        continue;
-                                    };
-                                    // Skip emoji clusters split across rows.
-                                    if bounds.height() > line_height * 1.5 {
-                                        continue;
+                                ui.ctx().data_mut(|data| {
+                                    data.insert_temp(composer_rect_id, output.response.response.rect);
+                                });
+                                if composer_blurred {
+                                    widgets::paint_pseudo_blur_galley(ui, output.galley_pos, output.galley.clone(), palette.text);
+                                    if !clusters.is_empty() {
+                                        let placements: Vec<String> = clusters.iter().map(|(_, _, c)| c.clone()).collect();
+                                        widgets::paint_blurred_emojis(ui, &output.galley, output.galley_pos, &placements);
                                     }
-                                    let rect = bounds.translate(output.galley_pos.to_vec2());
-                                    crate::emoji::paint_cluster(ui, cluster, rect);
+                                } else {
+                                    for (start, length, cluster) in &clusters {
+                                        let Some(bounds) = crate::bidi::char_bounds(
+                                            &output.galley,
+                                            *start,
+                                            start + length,
+                                        ) else {
+                                            continue;
+                                        };
+                                        // Skip emoji clusters split across rows.
+                                        if bounds.height() > line_height * 1.5 {
+                                            continue;
+                                        }
+                                        let rect = bounds.translate(output.galley_pos.to_vec2());
+                                        crate::emoji::paint_cluster(ui, cluster, rect);
+                                    }
                                 }
                                 // The row was sized from last frame's text. When a
                                 // keystroke wraps or unwraps a line, lay the frame
@@ -2571,7 +2649,7 @@ fn link_preview_strip(app: &mut App, ui: &mut egui::Ui) {
                     let right = ui.max_rect().right();
                     let (bar, _) = ui.allocate_exact_size(vec2(3.0, 0.0), Sense::hover());
                     let width = (ui.available_width() - 46.0).max(0.0);
-                    let card = preview_layout(ui, &palette, &composed.preview, thumbnail, width);
+                    let card = preview_layout(ui, &palette, &composed.preview, thumbnail, width, false);
                     ui.painter().rect_filled(
                         Rect::from_x_y_ranges(bar.x_range(), card.y_range()),
                         2.0,
@@ -2678,6 +2756,8 @@ struct View<'a> {
     copy_rows: Option<&'a std::sync::Mutex<Vec<crate::transcript::Row>>>,
     /// How far this chat's downloading attachments have got, by message.
     download_progress: Option<&'a HashMap<String, u8>>,
+    privacy_blur: bool,
+    blurred: bool,
 }
 
 /// How far `message`'s attachment download has got, once the worker has said.
@@ -3142,6 +3222,8 @@ fn messages(app: &mut App, ui: &mut egui::Ui, chat: &Chat, under: f32) {
         copy_rows: (!app.selection.as_ref().is_some_and(|(id, _)| *id == chat.id))
             .then_some(app.copy_rows.as_ref()),
         download_progress: app.download_progress.get(&chat.id),
+        privacy_blur: app.privacy_blur,
+        blurred: false,
     };
     let mut actions = Vec::new();
     let mut anchored = false;
@@ -4955,26 +5037,39 @@ fn bubble(
                         }
                         _ => space,
                     };
-                    let avatar = ui.interact(rect, id.with("avatar"), Sense::CLICK);
+                    let avatar = ui
+                        .interact(rect, id.with("avatar"), Sense::CLICK)
+                        .on_hover_cursor(egui::CursorIcon::PointingHand);
                     theme::focus_outline(ui, avatar.id, rect, SENDER_AVATAR / 2.0);
-                    if avatar
-                        .on_hover_cursor(egui::CursorIcon::PointingHand)
-                        .clicked()
-                    {
+                    if avatar.clicked() {
                         actions.push(sender_info_action(message));
                     }
                     if ui.is_rect_visible(rect) {
                         let name = (view.names_or)(&message.sender, message.sender_name.as_deref());
-                        widgets::paint_avatar(
-                            ui,
-                            &view.palette,
-                            rect,
-                            name.trim_start_matches('~'),
-                            &message.sender,
-                            view.avatars
-                                .get(&message.sender)
-                                .and_then(|picture| picture.as_deref()),
-                        );
+                        let avatar_hovered = avatar.hovered() || widgets::rect_hovered(ui, rect, 2.0);
+                        if view.privacy_blur && !avatar_hovered {
+                            widgets::paint_avatar_blurred(
+                                ui,
+                                &view.palette,
+                                rect,
+                                name.trim_start_matches('~'),
+                                &message.sender,
+                                view.avatars
+                                    .get(&message.sender)
+                                    .and_then(|picture| picture.as_deref()),
+                            );
+                        } else {
+                            widgets::paint_avatar(
+                                ui,
+                                &view.palette,
+                                rect,
+                                name.trim_start_matches('~'),
+                                &message.sender,
+                                view.avatars
+                                    .get(&message.sender)
+                                    .and_then(|picture| picture.as_deref()),
+                            );
+                        }
                     }
                 });
             } else {
@@ -5582,6 +5677,12 @@ fn bubble_frame(
     let rect_id = bubble_id.with("rect");
     let previous = ui.ctx().data(|data| data.get_temp::<Rect>(rect_id));
     let early = previous.map(|rect| ui.interact(rect, bubble_id, Sense::CLICK));
+    let is_hovered = previous.is_some_and(|rect| widgets::rect_hovered(ui, rect, 2.0))
+        || early.as_ref().is_some_and(|r| r.hovered());
+    let view = &View {
+        blurred: view.privacy_blur && !is_hovered,
+        ..*view
+    };
     // Painted once the contents are measured, beneath them.
     let backdrop = ui.painter().add(egui::Shape::Noop);
     let tail = (tailed && fill != Color32::TRANSPARENT).then_some(if own {
@@ -5600,12 +5701,21 @@ fn bubble_frame(
             ui.spacing_mut().item_spacing.y = 4.0;
             if show_sender && view.chat.is_group() {
                 let name = (view.names_or)(&message.sender, message.sender_name.as_deref());
-                let response = widgets::rich_text(
-                    ui,
-                    &name,
-                    theme::semibold(13.0),
-                    palette.sender(crate::util::hue(&message.sender)),
-                );
+                let response = if view.blurred {
+                    widgets::rich_text_blurred(
+                        ui,
+                        &name,
+                        theme::semibold(13.0),
+                        palette.sender(crate::util::hue(&message.sender)),
+                    )
+                } else {
+                    widgets::rich_text(
+                        ui,
+                        &name,
+                        theme::semibold(13.0),
+                        palette.sender(crate::util::hue(&message.sender)),
+                    )
+                };
                 let response = ui
                     .interact(
                         response.rect,
@@ -6224,8 +6334,13 @@ fn quote_block(
                 |ui| {
                     ui.set_width(inner_width);
                     ui.spacing_mut().item_spacing.y = 1.0;
-                    widgets::rich_text(ui, &who, theme::semibold(12.5), colours.name);
-                    widgets::rich_text(ui, &summary, theme::regular(12.5), colours.text);
+                    if view.blurred {
+                        widgets::rich_text_blurred(ui, &who, theme::semibold(12.5), colours.name);
+                        widgets::rich_text_blurred(ui, &summary, theme::regular(12.5), colours.text);
+                    } else {
+                        widgets::rich_text(ui, &who, theme::semibold(12.5), colours.name);
+                        widgets::rich_text(ui, &summary, theme::regular(12.5), colours.text);
+                    }
                 },
             );
         })
@@ -7125,6 +7240,8 @@ pub(crate) fn list_menu(
         starred: marks.starred.then_some(&stars),
         pins: app.pins.get(&message.chat),
         pin_notices: &[],
+        privacy_blur: app.privacy_blur,
+        blurred: false,
     };
     context_menu(ui, &view, message, MenuOrigin::List, actions);
 }
@@ -8425,7 +8542,11 @@ fn content(
                     let name = details
                         .as_ref()
                         .map_or(display_name.as_str(), |contact| contact.name.as_str());
-                    widgets::rich_text(ui, name, theme::medium(14.0), palette.text);
+                    if view.blurred {
+                        widgets::rich_text_blurred(ui, name, theme::medium(14.0), palette.text);
+                    } else {
+                        widgets::rich_text(ui, name, theme::medium(14.0), palette.text);
+                    }
                     match details.as_ref() {
                         Some(SharedContact {
                             account: Some(account),
@@ -8498,7 +8619,11 @@ fn content(
             mirrored_row(ui, own, icon, |ui| {
                 ui.vertical(|ui| {
                     ui.spacing_mut().item_spacing.y = 1.0;
-                    widgets::rich_text(ui, name, theme::medium(14.0), palette.text);
+                    if view.blurred {
+                        widgets::rich_text_blurred(ui, name, theme::medium(14.0), palette.text);
+                    } else {
+                        widgets::rich_text(ui, name, theme::medium(14.0), palette.text);
+                    }
                     let stickers =
                         crate::i18n::ngettext(view.locale, "{} sticker", "{} stickers", *count)
                             .replace("{}", &count.to_string());
@@ -8535,6 +8660,7 @@ fn content(
                 view.connected,
                 view.poll_voting
                     .contains(&(message.chat.clone(), message.id.clone())),
+                view.blurred,
                 actions,
             );
             None
@@ -9056,48 +9182,73 @@ fn album_tile(
     theme::reveal_focus(&response);
     if ui.is_rect_visible(rect) {
         ui.painter().rect_filled(rect, 5.0, view.palette.surface);
-        let uri = media
-            .path
-            .as_ref()
-            .filter(|_| matches!(message.content, Content::Image { .. }))
-            .map(|path| {
-                let uri = crate::util::image_uri(path);
-                crate::image_cache::touch(ui.ctx(), &uri);
-                uri
-            })
-            .or_else(|| {
-                message.thumbnail.as_deref().map(|bytes| {
-                    thumbnail_uri(
-                        ui.ctx(),
-                        &message.chat,
-                        &format!("{}-album-{row}-{column}", message.id),
-                        bytes,
-                    )
+        let tile_hovered = response.hovered() || widgets::rect_hovered(ui, rect, 2.0);
+        let tile_blurred = view.blurred && !tile_hovered;
+        let mut blurred_painted = false;
+        if tile_blurred {
+            if let Some(path) = media.path.as_ref() {
+                if let Some(blurred_tex) = widgets::blurred_image_texture(ui.ctx(), path) {
+                    egui::Image::from_texture(&blurred_tex)
+                        .fit_to_exact_size(size)
+                        .corner_radius(5.0)
+                        .paint_at(ui, rect);
+                    blurred_painted = true;
+                }
+            } else if let Some(bytes) = message.thumbnail.as_deref() {
+                let key = format!("{}-album-{row}-{column}", message.id);
+                if let Some(blurred_tex) = widgets::blurred_bytes_texture(ui.ctx(), &key, bytes) {
+                    egui::Image::from_texture(&blurred_tex)
+                        .fit_to_exact_size(size)
+                        .corner_radius(5.0)
+                        .paint_at(ui, rect);
+                    blurred_painted = true;
+                }
+            }
+        }
+        if !blurred_painted {
+            let uri = media
+                .path
+                .as_ref()
+                .filter(|_| matches!(message.content, Content::Image { .. }))
+                .map(|path| {
+                    let uri = crate::util::image_uri(path);
+                    crate::image_cache::touch(ui.ctx(), &uri);
+                    uri
                 })
-            });
-        if let Some(uri) = uri {
-            let image = egui::Image::new(uri);
-            let dimensions = match image.load_for_size(ui.ctx(), size) {
-                Ok(egui::load::TexturePoll::Ready { texture }) => Some(texture.size),
-                Ok(egui::load::TexturePoll::Pending { .. }) => Some(vec2(
-                    media.width.unwrap_or(1) as f32,
-                    media.height.unwrap_or(1) as f32,
-                )),
-                Err(_) => None,
-            };
-            if let Some(dimensions) = dimensions {
-                let ratio = dimensions.x / dimensions.y.max(1.0);
-                let target = size.x / size.y.max(1.0);
-                let uv = if ratio > target {
-                    vec2(target / ratio, 1.0)
-                } else {
-                    vec2(1.0, ratio / target)
+                .or_else(|| {
+                    message.thumbnail.as_deref().map(|bytes| {
+                        thumbnail_uri(
+                            ui.ctx(),
+                            &message.chat,
+                            &format!("{}-album-{row}-{column}", message.id),
+                            bytes,
+                        )
+                    })
+                });
+            if let Some(uri) = uri {
+                let image = egui::Image::new(uri);
+                let dimensions = match image.load_for_size(ui.ctx(), size) {
+                    Ok(egui::load::TexturePoll::Ready { texture }) => Some(texture.size),
+                    Ok(egui::load::TexturePoll::Pending { .. }) => Some(vec2(
+                        media.width.unwrap_or(1) as f32,
+                        media.height.unwrap_or(1) as f32,
+                    )),
+                    Err(_) => None,
                 };
-                image
-                    .uv(Rect::from_center_size(pos2(0.5, 0.5), uv))
-                    .fit_to_exact_size(size)
-                    .corner_radius(5.0)
-                    .paint_at(ui, rect);
+                if let Some(dimensions) = dimensions {
+                    let ratio = dimensions.x / dimensions.y.max(1.0);
+                    let target = size.x / size.y.max(1.0);
+                    let uv = if ratio > target {
+                        vec2(target / ratio, 1.0)
+                    } else {
+                        vec2(1.0, ratio / target)
+                    };
+                    image
+                        .uv(Rect::from_center_size(pos2(0.5, 0.5), uv))
+                        .fit_to_exact_size(size)
+                        .corner_radius(5.0)
+                        .paint_at(ui, rect);
+                }
             }
         }
         if matches!(message.content, Content::Video { .. }) {
@@ -9123,6 +9274,7 @@ fn album_tile(
                 }
             }
         }
+
         if not_sent(message) {
             let starred = view.starred.is_some_and(|ids| ids.contains(&message.id));
             let pinned = view.pins.is_some_and(|ids| ids.contains(&message.id));
@@ -9795,7 +9947,15 @@ fn rich_body(
         rect.min
     };
     if visible || selection_alive {
-        markup::paint_selectable(ui, &laid, &response, origin, palette.text, visible);
+        let text_hovered = response.hovered() || widgets::rect_hovered(ui, rect, 2.0);
+        if view.blurred && !text_hovered {
+            widgets::paint_pseudo_blur_galley(ui, origin, laid.galley.clone(), palette.text);
+            if !laid.placements().is_empty() {
+                widgets::paint_blurred_emojis(ui, &laid.galley, origin, laid.placements());
+            }
+        } else {
+            markup::paint_selectable(ui, &laid, &response, origin, palette.text, visible);
+        }
     }
     let message_number = crate::i18n::gettext(view.locale, "Message");
     let copy_number = crate::i18n::gettext(view.locale, "Copy number");
@@ -9910,6 +10070,10 @@ fn preview_card(
         .thumbnail
         .as_deref()
         .map(|bytes| (message.chat.as_str(), message.id.as_str(), bytes));
+    let card_id = bubble_id(&view.chat.id, &message.id).with("preview");
+    let prev_rect = ui.ctx().data(|data| data.get_temp::<Rect>(card_id));
+    let card_hovered = prev_rect.is_some_and(|r| widgets::rect_hovered(ui, r, 2.0));
+    let card_blurred = view.blurred && !card_hovered;
     let response = Frame::new()
         .fill(palette.window.gamma_multiply(0.35))
         .corner_radius(CornerRadius::same(6))
@@ -9918,14 +10082,11 @@ fn preview_card(
             // Include margins in the settled card width.
             let card_width = (width - 16.0).max(0.0);
             ui.set_width(card_width);
-            preview_layout(ui, &palette, preview, thumbnail, card_width);
+            preview_layout(ui, &palette, preview, thumbnail, card_width, card_blurred);
         })
         .response;
     ui.ctx().data_mut(|data| {
-        data.insert_temp(
-            bubble_id(&view.chat.id, &message.id).with("preview"),
-            response.rect,
-        );
+        data.insert_temp(card_id, response.rect);
     });
     let response = ui
         .interact(
@@ -9949,6 +10110,7 @@ fn preview_layout(
     preview: &LinkPreview,
     thumbnail: Option<(&str, &str, &[u8])>,
     card_width: f32,
+    blurred: bool,
 ) -> Rect {
     let domain = preview
         .url
@@ -9970,18 +10132,34 @@ fn preview_layout(
                 // Off-screen cards are laid out too; only a visible
                 // one keeps its thumbnail resident.
                 if ui.is_rect_visible(rect) {
-                    let uri = thumbnail_uri(ui.ctx(), chat, id, bytes);
-                    egui::Image::new(uri)
-                        .fit_to_exact_size(rect.size())
-                        .corner_radius(4.0)
-                        .paint_at(ui, rect);
+                    if blurred {
+                        let key = format!("thumb-{chat}-{id}");
+                        if let Some(tex) = widgets::blurred_bytes_texture(ui.ctx(), &key, bytes) {
+                            egui::Image::from_texture(&tex)
+                                .fit_to_exact_size(rect.size())
+                                .corner_radius(4.0)
+                                .paint_at(ui, rect);
+                        } else {
+                            ui.painter().rect_filled(rect, 4.0, palette.surface);
+                        }
+                    } else {
+                        let uri = thumbnail_uri(ui.ctx(), chat, id, bytes);
+                        egui::Image::new(uri)
+                            .fit_to_exact_size(rect.size())
+                            .corner_radius(4.0)
+                            .paint_at(ui, rect);
+                    }
                 }
             }
             ui.vertical(|ui| {
                 ui.spacing_mut().item_spacing.y = 2.0;
                 ui.set_width(column);
                 if let Some(title) = &preview.title {
-                    widgets::rich_text(ui, title, theme::semibold(13.5), palette.text);
+                    if blurred {
+                        widgets::rich_text_blurred(ui, title, theme::semibold(13.5), palette.text);
+                    } else {
+                        widgets::rich_text(ui, title, theme::semibold(13.5), palette.text);
+                    }
                 }
                 if let Some(description) = &preview.description {
                     let line = widgets::line(
@@ -9993,9 +10171,17 @@ fn preview_layout(
                         2,
                     );
                     let (rect, _) = ui.allocate_exact_size(line.size(), Sense::hover());
-                    line.paint(ui, rect.min, palette.secondary);
+                    if blurred {
+                        line.paint_blurred(ui, rect.min, palette.secondary);
+                    } else {
+                        line.paint(ui, rect.min, palette.secondary);
+                    }
                 }
-                theme::text(ui, &domain, theme::regular(12.0), palette.dim);
+                if blurred {
+                    widgets::rich_text_blurred(ui, &domain, theme::regular(12.0), palette.dim);
+                } else {
+                    theme::text(ui, &domain, theme::regular(12.0), palette.dim);
+                }
             });
         });
     })
@@ -10018,10 +10204,14 @@ fn location_card(
     actions: &mut Vec<Action>,
 ) {
     let palette = view.palette;
+    let card_id = bubble_id(&view.chat.id, &message.id).with("loc");
+    let prev_rect = ui.ctx().data(|data| data.get_temp::<Rect>(card_id));
+    let card_hovered = prev_rect.is_some_and(|r| widgets::rect_hovered(ui, r, 2.0));
+    let card_blurred = view.blurred && !card_hovered;
     // A bounded, left-aligned layout: own bubbles inherit right-to-left flow,
     // which would otherwise stretch the card and make its width oscillate.
     let card = ui.available_width().min(LOCATION_CARD_WIDTH);
-    ui.allocate_ui_with_layout(vec2(card, 0.0), Layout::top_down(Align::Min), |ui| {
+    let response = ui.allocate_ui_with_layout(vec2(card, 0.0), Layout::top_down(Align::Min), |ui| {
         ui.set_width(card);
         ui.spacing_mut().item_spacing.y = 2.0;
         // The preview already marks the spot. Crop the square preview to the
@@ -10029,27 +10219,59 @@ fn location_card(
         if let Some(bytes) = message.thumbnail.as_deref()
             && !bytes.is_empty()
         {
-            let uri = thumbnail_uri(ui.ctx(), &message.chat, preview_key, bytes);
             let height = (card * 0.56).round();
             let crop = (1.0 - height / card) / 2.0;
-            ui.add(
-                egui::Image::new(uri)
-                    .maintain_aspect_ratio(false)
-                    .uv(Rect::from_min_max(pos2(0.0, crop), pos2(1.0, 1.0 - crop)))
-                    .fit_to_exact_size(Vec2::new(card, height))
-                    .corner_radius(8.0),
-            );
+            if card_blurred {
+                let key = format!("loc-thumb-{}-{}", message.chat, preview_key);
+                if let Some(tex) = widgets::blurred_bytes_texture(ui.ctx(), &key, bytes) {
+                    ui.add(
+                        egui::Image::from_texture(&tex)
+                            .maintain_aspect_ratio(false)
+                            .uv(Rect::from_min_max(pos2(0.0, crop), pos2(1.0, 1.0 - crop)))
+                            .fit_to_exact_size(Vec2::new(card, height))
+                            .corner_radius(8.0),
+                    );
+                } else {
+                    ui.painter().rect_filled(
+                        Rect::from_min_size(ui.next_widget_position(), Vec2::new(card, height)),
+                        8.0,
+                        palette.surface,
+                    );
+                    ui.add_space(height);
+                }
+            } else {
+                let uri = thumbnail_uri(ui.ctx(), &message.chat, preview_key, bytes);
+                ui.add(
+                    egui::Image::new(uri)
+                        .maintain_aspect_ratio(false)
+                        .uv(Rect::from_min_max(pos2(0.0, crop), pos2(1.0, 1.0 - crop)))
+                        .fit_to_exact_size(Vec2::new(card, height))
+                        .corner_radius(8.0),
+                );
+            }
             ui.add_space(4.0);
         }
         ui.horizontal(|ui| {
             theme::icon(ui, Icon::MapPin, 16.0, palette.accent);
-            widgets::rich_text(ui, title, theme::medium(14.0), palette.text);
+            if card_blurred {
+                widgets::rich_text_blurred(ui, title, theme::medium(14.0), palette.text);
+            } else {
+                widgets::rich_text(ui, title, theme::medium(14.0), palette.text);
+            }
         });
         if let Some(detail) = detail {
-            widgets::rich_text(ui, &detail, theme::regular(12.5), palette.secondary);
+            if card_blurred {
+                widgets::rich_text_blurred(ui, &detail, theme::regular(12.5), palette.secondary);
+            } else {
+                widgets::rich_text(ui, &detail, theme::regular(12.5), palette.secondary);
+            }
         }
         if let Some(note) = note {
-            widgets::rich_text(ui, &note, theme::regular(12.5), palette.secondary);
+            if card_blurred {
+                widgets::rich_text_blurred(ui, &note, theme::regular(12.5), palette.secondary);
+            } else {
+                widgets::rich_text(ui, &note, theme::regular(12.5), palette.secondary);
+            }
         }
         if theme::link(
             ui,
@@ -10065,6 +10287,9 @@ fn location_card(
             };
             actions.push(Action::OpenUrl(crate::geo::map_url(spot)));
         }
+    });
+    ui.ctx().data_mut(|data| {
+        data.insert_temp(card_id, response.response.rect);
     });
 }
 
@@ -10163,23 +10388,35 @@ fn picture(
                 media.height.unwrap_or(180) as f32,
             );
             let (rect, response) = ui.allocate_exact_size(size, Sense::click());
+            let anim_hovered = response.hovered() || widgets::rect_hovered(ui, rect, 2.0);
             let mut unreadable = false;
             if ui.is_rect_visible(rect) {
-                match animation::frame(ui, path, rect, view.animate && response.hovered()) {
-                    animation::Frame::Ready(texture) => {
-                        ui.painter().image(
-                            texture.id(),
-                            rect,
-                            Rect::from_min_max(egui::Pos2::ZERO, egui::pos2(1.0, 1.0)),
-                            Color32::WHITE,
-                        );
-                    }
-                    frame => {
+                if view.blurred && !anim_hovered {
+                    if let Some(texture) = widgets::blurred_image_texture(ui.ctx(), path) {
+                        egui::Image::from_texture(&texture)
+                            .fit_to_exact_size(size)
+                            .corner_radius(radius)
+                            .paint_at(ui, rect);
+                    } else {
                         ui.painter().rect_filled(rect, radius, palette.surface);
-                        theme::paint_icon(ui, Icon::Sticker, rect, 32.0, palette.secondary);
-                        // A file that is gone or does not decode would stay
-                        // this placeholder for good (#603).
-                        unreadable = matches!(frame, animation::Frame::Unavailable);
+                    }
+                } else {
+                    match animation::frame(ui, path, rect, view.animate && response.hovered()) {
+                        animation::Frame::Ready(texture) => {
+                            ui.painter().image(
+                                texture.id(),
+                                rect,
+                                Rect::from_min_max(egui::Pos2::ZERO, egui::pos2(1.0, 1.0)),
+                                Color32::WHITE,
+                            );
+                        }
+                        frame => {
+                            ui.painter().rect_filled(rect, radius, palette.surface);
+                            theme::paint_icon(ui, Icon::Sticker, rect, 32.0, palette.secondary);
+                            // A file that is gone or does not decode would stay
+                            // this placeholder for good (#603).
+                            unreadable = matches!(frame, animation::Frame::Unavailable);
+                        }
                     }
                 }
             }
@@ -10215,6 +10452,64 @@ fn picture(
         if !ui.is_rect_visible(Rect::from_min_size(position, reserved)) {
             return ui.allocate_exact_size(reserved, Sense::hover()).0;
         }
+        let open_action = || match sticker {
+            Some(_) => Action::PreviewSticker(path.clone()),
+            None => match crate::image_preview::open_target(path, true) {
+                crate::image_preview::OpenTarget::Preview => Action::PreviewImage {
+                    path: path.clone(),
+                    chat: view.chat.id.clone(),
+                    message: message.id.clone(),
+                    card: None,
+                },
+                crate::image_preview::OpenTarget::External => Action::OpenFile(path.clone()),
+            },
+        };
+        let pic_rect_id = bubble_id(&view.chat.id, &message.id).with("pic-rect");
+        if view.blurred {
+            let prev_pic_rect = ui.ctx().data(|data| data.get_temp::<Rect>(pic_rect_id));
+            let pic_hovered = prev_pic_rect.is_some_and(|r| widgets::rect_hovered(ui, r, 2.0));
+            if !pic_hovered {
+                if !path.is_file() {
+                    let (rect, _) = ui.allocate_exact_size(reserved, Sense::hover());
+                    ui.ctx()
+                        .data_mut(|data| data.insert_temp(pic_rect_id, rect));
+                    if ui.is_rect_visible(rect) {
+                        ui.painter().rect_filled(rect, radius, palette.surface);
+                    }
+                    actions.push(unreadable_media(view, message, path));
+                    return rect;
+                }
+                let blurred_result = widgets::blurred_image_texture_sized(ui.ctx(), path);
+                let orig_pixels = drawn.or_else(|| blurred_result.as_ref().map(|(_, s)| *s));
+                if let Some((_, s)) = &blurred_result
+                    && drawn != Some(*s)
+                {
+                    ui.ctx().data_mut(|data| data.insert_temp(pixels_id, *s));
+                }
+                let size = orig_pixels.map_or(reserved, fit);
+                let (rect, response) = ui.allocate_exact_size(size, Sense::click());
+                ui.ctx()
+                    .data_mut(|data| data.insert_temp(pic_rect_id, rect));
+                let image_radius = if sticker.is_some() { 0.0 } else { radius };
+                if ui.is_rect_visible(rect) {
+                    if let Some((blurred_tex, _)) = blurred_result {
+                        egui::Image::from_texture(&blurred_tex)
+                            .fit_to_exact_size(size)
+                            .corner_radius(image_radius)
+                            .paint_at(ui, rect);
+                    } else {
+                        ui.painter().rect_filled(rect, image_radius, palette.surface);
+                    }
+                }
+                if response
+                    .on_hover_cursor(egui::CursorIcon::PointingHand)
+                    .clicked()
+                {
+                    actions.push(open_action());
+                }
+                return rect;
+            }
+        }
         let image = widgets::file_image(ui, path);
         return match image.load_for_size(ui.ctx(), vec2(max_width, max_height)) {
             Ok(egui::load::TexturePoll::Ready { texture }) => {
@@ -10223,32 +10518,33 @@ fn picture(
                         .data_mut(|data| data.insert_temp(pixels_id, texture.size));
                 }
                 let size = fit(texture.size);
-                let response = ui.add(
-                    image
-                        .fit_to_exact_size(size)
-                        .corner_radius(if sticker.is_some() { 0.0 } else { radius })
-                        .sense(Sense::click()),
-                );
-                let rect = response.rect;
+                let (rect, response) = ui.allocate_exact_size(size, Sense::click());
+                ui.ctx()
+                    .data_mut(|data| data.insert_temp(pic_rect_id, rect));
+                let pic_hovered = response.hovered() || widgets::rect_hovered(ui, rect, 2.0);
+                if ui.is_rect_visible(rect) {
+                    let image_radius = if sticker.is_some() { 0.0 } else { radius };
+                    if view.blurred && !pic_hovered {
+                        if let Some(blurred_tex) = widgets::blurred_image_texture(ui.ctx(), path) {
+                            egui::Image::from_texture(&blurred_tex)
+                                .fit_to_exact_size(size)
+                                .corner_radius(image_radius)
+                                .paint_at(ui, rect);
+                        } else {
+                            ui.painter().rect_filled(rect, image_radius, palette.surface);
+                        }
+                    } else {
+                        image
+                            .fit_to_exact_size(size)
+                            .corner_radius(image_radius)
+                            .paint_at(ui, rect);
+                    }
+                }
                 if response
                     .on_hover_cursor(egui::CursorIcon::PointingHand)
                     .clicked()
                 {
-                    let action = match sticker {
-                        Some(_) => Action::PreviewSticker(path.clone()),
-                        None => match crate::image_preview::open_target(path, true) {
-                            crate::image_preview::OpenTarget::Preview => Action::PreviewImage {
-                                path: path.clone(),
-                                chat: view.chat.id.clone(),
-                                message: message.id.clone(),
-                                card: None,
-                            },
-                            crate::image_preview::OpenTarget::External => {
-                                Action::OpenFile(path.clone())
-                            }
-                        },
-                    };
-                    actions.push(action);
+                    actions.push(open_action());
                 }
                 rect
             }
@@ -10310,72 +10606,91 @@ fn picture(
     }
     let size = frame_size(media, None, max_width, max_height);
     let (rect, response) = ui.allocate_exact_size(size, Sense::click());
+    let pic_hovered = response.hovered() || widgets::rect_hovered(ui, rect, 2.0);
+    let pic_blurred = view.blurred && !pic_hovered;
     if ui.is_rect_visible(rect) {
-        let thumbnail = message
-            .thumbnail
-            .as_deref()
-            .filter(|_| sticker.is_none())
-            .map(|bytes| thumbnail_uri(ui.ctx(), &message.chat, &message.id, bytes));
-        match thumbnail {
-            Some(uri) => {
-                egui::Image::new(uri)
-                    .fit_to_exact_size(size)
-                    .corner_radius(radius)
-                    .paint_at(ui, rect);
-                ui.painter()
-                    .rect_filled(rect, radius, Color32::from_black_alpha(60));
+        if pic_blurred {
+            let mut blurred_drawn = false;
+            if let Some(bytes) = message.thumbnail.as_deref() {
+                let key = format!("{}-unloaded-thumb", message.id);
+                if let Some(tex) = widgets::blurred_bytes_texture(ui.ctx(), &key, bytes) {
+                    egui::Image::from_texture(&tex)
+                        .fit_to_exact_size(size)
+                        .corner_radius(radius)
+                        .paint_at(ui, rect);
+                    blurred_drawn = true;
+                }
             }
-            None => {
+            if !blurred_drawn {
                 ui.painter().rect_filled(rect, radius, palette.surface);
             }
-        }
-        let disc = Rect::from_center_size(rect.center(), Vec2::splat(44.0));
-        match &media.state {
-            MediaState::Downloading => {
-                ui.painter()
-                    .circle_filled(disc.center(), 22.0, Color32::from_black_alpha(120));
-                theme::paint_progress(
-                    ui,
-                    disc,
-                    22.0,
-                    download_fraction(view, message),
-                    Color32::WHITE,
-                );
+        } else {
+            let thumbnail = message
+                .thumbnail
+                .as_deref()
+                .filter(|_| sticker.is_none())
+                .map(|bytes| thumbnail_uri(ui.ctx(), &message.chat, &message.id, bytes));
+            match thumbnail {
+                Some(uri) => {
+                    egui::Image::new(uri)
+                        .fit_to_exact_size(size)
+                        .corner_radius(radius)
+                        .paint_at(ui, rect);
+                    ui.painter()
+                        .rect_filled(rect, radius, Color32::from_black_alpha(60));
+                }
+                None => {
+                    ui.painter().rect_filled(rect, radius, palette.surface);
+                }
             }
-            MediaState::Failed(_) => {
-                ui.painter()
-                    .circle_filled(disc.center(), 22.0, Color32::from_black_alpha(120));
-                theme::paint_icon(ui, Icon::CircleAlert, disc, 22.0, palette.danger);
-                ui.painter().text(
-                    rect.center() + vec2(0.0, 34.0),
-                    Align2::CENTER_CENTER,
-                    crate::i18n::gettext(view.locale, "Download failed. Click to retry."),
-                    theme::regular(11.5),
-                    Color32::WHITE,
-                );
-            }
-            MediaState::Idle => {
-                ui.painter()
-                    .circle_filled(disc.center(), 22.0, Color32::from_black_alpha(120));
-                theme::paint_icon(
-                    ui,
-                    if sticker.is_some() {
-                        Icon::Sticker
-                    } else {
-                        Icon::Download
-                    },
-                    disc,
-                    22.0,
-                    Color32::WHITE,
-                );
-                if sticker.is_none() {
+            let disc = Rect::from_center_size(rect.center(), Vec2::splat(44.0));
+            match &media.state {
+                MediaState::Downloading => {
+                    ui.painter()
+                        .circle_filled(disc.center(), 22.0, Color32::from_black_alpha(120));
+                    theme::paint_progress(
+                        ui,
+                        disc,
+                        22.0,
+                        download_fraction(view, message),
+                        Color32::WHITE,
+                    );
+                }
+                MediaState::Failed(_) => {
+                    ui.painter()
+                        .circle_filled(disc.center(), 22.0, Color32::from_black_alpha(120));
+                    theme::paint_icon(ui, Icon::CircleAlert, disc, 22.0, palette.danger);
                     ui.painter().text(
                         rect.center() + vec2(0.0, 34.0),
                         Align2::CENTER_CENTER,
-                        crate::util::bytes(media.size),
+                        crate::i18n::gettext(view.locale, "Download failed. Click to retry."),
                         theme::regular(11.5),
                         Color32::WHITE,
                     );
+                }
+                MediaState::Idle => {
+                    ui.painter()
+                        .circle_filled(disc.center(), 22.0, Color32::from_black_alpha(120));
+                    theme::paint_icon(
+                        ui,
+                        if sticker.is_some() {
+                            Icon::Sticker
+                        } else {
+                            Icon::Download
+                        },
+                        disc,
+                        22.0,
+                        Color32::WHITE,
+                    );
+                    if sticker.is_none() {
+                        ui.painter().text(
+                            rect.center() + vec2(0.0, 34.0),
+                            Align2::CENTER_CENTER,
+                            crate::util::bytes(media.size),
+                            theme::regular(11.5),
+                            Color32::WHITE,
+                        );
+                    }
                 }
             }
         }
@@ -10542,8 +10857,10 @@ fn video(
         PICTURE_HEIGHT.min(limit * 1.3),
     );
     let (rect, response) = ui.allocate_exact_size(size, Sense::click());
+    let video_hovered = response.hovered() || widgets::rect_hovered(ui, rect, 2.0);
+    let video_blurred = view.blurred && !video_hovered;
     let playing = match (&media.path, gif) {
-        (Some(path), true) => Some(animation::frame(
+        (Some(path), true) if !video_blurred => Some(animation::frame(
             ui,
             path,
             rect,
@@ -10575,45 +10892,68 @@ fn video(
         .filter(|_| !gif)
         .and_then(|_| view.video.status(&message.id));
     if ui.is_rect_visible(rect) {
-        if status.is_some() {
-            view.video.saw(&message.id);
-        }
-        match status.as_ref().and_then(|status| status.frame.as_ref()) {
-            Some(frame) => {
-                ui.painter().rect_filled(rect, 6.0, Color32::BLACK);
-                paint_texture(
-                    ui,
-                    fit_within(frame.size_vec2(), rect),
-                    frame.id(),
-                    Rect::from_min_max(egui::Pos2::ZERO, egui::pos2(1.0, 1.0)),
-                    6.0,
-                );
-            }
-            None => match (thumbnail, &media.path) {
-                (Some(thumbnail), _) => {
-                    // Registering the poster decodes it, so it waits for the row to show.
-                    let uri = thumbnail_uri(ui.ctx(), &message.chat, &message.id, thumbnail);
-                    egui::Image::new(uri)
+        let mut blurred_painted = false;
+        if video_blurred {
+            if let Some(thumbnail) = thumbnail {
+                let key = format!("{}-video-thumb", message.id);
+                if let Some(tex) = widgets::blurred_bytes_texture(ui.ctx(), &key, thumbnail) {
+                    egui::Image::from_texture(&tex)
                         .fit_to_exact_size(size)
                         .corner_radius(6.0)
                         .paint_at(ui, rect);
+                    blurred_painted = true;
                 }
-                (None, Some(path)) => {
+            } else if let Some(path) = &media.path {
+                if let Some(tex) = widgets::blurred_image_texture(ui.ctx(), path) {
+                    egui::Image::from_texture(&tex)
+                        .fit_to_exact_size(size)
+                        .corner_radius(6.0)
+                        .paint_at(ui, rect);
+                    blurred_painted = true;
+                }
+            }
+        }
+        if !blurred_painted {
+            if status.is_some() {
+                view.video.saw(&message.id);
+            }
+            match status.as_ref().and_then(|status| status.frame.as_ref()) {
+                Some(frame) => {
                     ui.painter().rect_filled(rect, 6.0, Color32::BLACK);
-                    if let animation::Frame::Ready(texture) =
-                        animation::frame(ui, path, rect, false)
-                    {
-                        paint_texture(
-                            ui,
-                            fit_within(texture.size_vec2(), rect),
-                            texture.id(),
-                            Rect::from_min_max(egui::Pos2::ZERO, egui::pos2(1.0, 1.0)),
-                            6.0,
-                        );
-                    }
+                    paint_texture(
+                        ui,
+                        fit_within(frame.size_vec2(), rect),
+                        frame.id(),
+                        Rect::from_min_max(egui::Pos2::ZERO, egui::pos2(1.0, 1.0)),
+                        6.0,
+                    );
                 }
-                (None, None) => {}
-            },
+                None => match (thumbnail, &media.path) {
+                    (Some(thumbnail), _) => {
+                        // Registering the poster decodes it, so it waits for the row to show.
+                        let uri = thumbnail_uri(ui.ctx(), &message.chat, &message.id, thumbnail);
+                        egui::Image::new(uri)
+                            .fit_to_exact_size(size)
+                            .corner_radius(6.0)
+                            .paint_at(ui, rect);
+                    }
+                    (None, Some(path)) => {
+                        ui.painter().rect_filled(rect, 6.0, Color32::BLACK);
+                        if let animation::Frame::Ready(texture) =
+                            animation::frame(ui, path, rect, false)
+                        {
+                            paint_texture(
+                                ui,
+                                fit_within(texture.size_vec2(), rect),
+                                texture.id(),
+                                Rect::from_min_max(egui::Pos2::ZERO, egui::pos2(1.0, 1.0)),
+                                6.0,
+                            );
+                        }
+                    }
+                    (None, None) => {}
+                },
+            }
         }
         let state = status.as_ref().map(|status| status.state);
         if state != Some(State::Playing) {
@@ -11153,6 +11493,10 @@ fn attachment(
     actions: &mut Vec<Action>,
 ) {
     let palette = view.palette;
+    let card_id = bubble_id(&view.chat.id, &message.id).with("card");
+    let prev_rect = ui.ctx().data(|data| data.get_temp::<Rect>(card_id));
+    let card_hovered = prev_rect.is_some_and(|r| widgets::rect_hovered(ui, r, 2.0));
+    let card_blurred = view.blurred && !card_hovered;
     let response = Frame::new()
         .fill(palette.window.gamma_multiply(0.35))
         .corner_radius(CornerRadius::same(8))
@@ -11187,12 +11531,20 @@ fn attachment(
                     ui.spacing_mut().item_spacing.y = 1.0;
                     // Reserve 70 points for the icon, action, and gaps.
                     ui.set_width((card - 70.0).max(0.0));
-                    widgets::rich_text(ui, title, theme::medium(14.0), palette.text);
+                    if card_blurred {
+                        widgets::rich_text_blurred(ui, title, theme::medium(14.0), palette.text);
+                    } else {
+                        widgets::rich_text(ui, title, theme::medium(14.0), palette.text);
+                    }
                     let detail = match &media.state {
                         MediaState::Failed(error) => format!("{error}. Click to retry."),
                         _ => detail.to_owned(),
                     };
-                    theme::text(ui, detail, theme::regular(12.0), palette.secondary);
+                    if card_blurred {
+                        widgets::rich_text_blurred(ui, &detail, theme::regular(12.0), palette.secondary);
+                    } else {
+                        theme::text(ui, detail, theme::regular(12.0), palette.secondary);
+                    }
                 });
             };
             // Fix the row left-to-right at the card width in own bubbles.
@@ -12858,6 +13210,8 @@ mod tests {
             starred: None,
             pins: None,
             pin_notices: &[],
+            privacy_blur: false,
+            blurred: false,
         };
         check(&view);
     }
@@ -13129,6 +13483,112 @@ mod tests {
         };
         assert!(offers("pregnant", "🤰"));
         assert!(offers("thumbsup", "👍"));
+    }
+
+    #[test]
+    fn privacy_blur_unblurs_on_hover_in_direct_message() {
+        let ctx = egui::Context::default();
+        crate::theme::install(&ctx);
+        with_still_view(|view| {
+            let message = crate::archive::tests::message("1@s.whatsapp.net", "m1", 0, false);
+            let view_blurred = View {
+                privacy_blur: true,
+                ..*view
+            };
+            let mut actions = Vec::new();
+
+            // Frame 1: message is rendered blurred, no hover.
+            let shapes1 = {
+                let mut output = ctx.run_ui(
+                    egui::RawInput {
+                        screen_rect: Some(Rect::from_min_size(egui::Pos2::ZERO, vec2(500.0, 500.0))),
+                        ..Default::default()
+                    },
+                    |ui| {
+                        bubble_frame(ui, &view_blurred, &message, None, false, true, 300.0, &mut actions);
+                    },
+                );
+                output.textures_delta.clear();
+                output.shapes.len()
+            };
+
+            // Frame 2: pointer hovers over the center of the message bubble.
+            let bubble_id = bubble_id(&view.chat.id, &message.id);
+            let rect = ctx.data(|d| d.get_temp::<Rect>(bubble_id.with("rect"))).expect("bubble rect stored");
+            let mut input2 = egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(egui::Pos2::ZERO, vec2(500.0, 500.0))),
+                ..Default::default()
+            };
+            input2.events.push(egui::Event::PointerMoved(rect.center()));
+            let shapes2 = {
+                let mut output = ctx.run_ui(input2, |ui| {
+                    bubble_frame(ui, &view_blurred, &message, None, false, true, 300.0, &mut actions);
+                });
+                output.textures_delta.clear();
+                output.shapes.len()
+            };
+
+            // On frame 1 (blurred), pseudo-blur multi-pass paints diffuse text shapes and backing pills.
+            // On frame 2 (hovered/revealed), it paints selectable text normally with fewer shapes.
+            assert!(shapes1 > shapes2, "hovered message reveals text without blur multi-pass shapes (shapes1={shapes1}, shapes2={shapes2})");
+        });
+    }
+
+    #[test]
+    fn privacy_blur_covers_documents_locations_and_polls() {
+        let ctx = egui::Context::default();
+        crate::theme::install(&ctx);
+        with_still_view(|view| {
+            let view_blurred = View {
+                privacy_blur: true,
+                ..*view
+            };
+            let mut actions = Vec::new();
+
+            // 1. Document
+            let mut doc_msg = crate::archive::tests::message("1@s.whatsapp.net", "doc1", 0, false);
+            doc_msg.content = Content::Document {
+                media: media(None, None),
+                file_name: "secret_report.pdf".into(),
+                caption: None,
+                pages: Some(5),
+            };
+
+            let mut out1 = ctx.run_ui(egui::RawInput::default(), |ui| {
+                bubble_frame(ui, &view_blurred, &doc_msg, None, false, true, 300.0, &mut actions);
+            });
+            out1.textures_delta.clear();
+            assert!(!out1.shapes.is_empty());
+
+            // 2. Location
+            let mut loc_msg = crate::archive::tests::message("1@s.whatsapp.net", "loc1", 0, false);
+            loc_msg.content = Content::Location {
+                latitude: 37.7749,
+                longitude: -122.4194,
+                name: Some("Secret Base".into()),
+                address: Some("123 Classified Way".into()),
+            };
+
+            let mut out2 = ctx.run_ui(egui::RawInput::default(), |ui| {
+                bubble_frame(ui, &view_blurred, &loc_msg, None, false, true, 300.0, &mut actions);
+            });
+            out2.textures_delta.clear();
+            assert!(!out2.shapes.is_empty());
+
+            // 3. Poll
+            let mut poll_msg = crate::archive::tests::message("1@s.whatsapp.net", "poll1", 0, false);
+            poll_msg.content = Content::Poll {
+                question: "Classified Vote?".into(),
+                options: vec!["Yes".into(), "No".into()],
+                state: crate::model::PollState::default(),
+            };
+
+            let mut out3 = ctx.run_ui(egui::RawInput::default(), |ui| {
+                bubble_frame(ui, &view_blurred, &poll_msg, None, false, true, 300.0, &mut actions);
+            });
+            out3.textures_delta.clear();
+            assert!(!out3.shapes.is_empty());
+        });
     }
 }
 

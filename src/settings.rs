@@ -451,6 +451,8 @@ pub struct Settings {
     pub enter_sends: bool,
     /// Send read receipts, subject to the account privacy setting.
     pub send_read_receipts: bool,
+    /// Whether privacy blur is active over chat messages, previews and avatars.
+    pub privacy_blur: bool,
     /// Send typing state while composing.
     pub send_typing: bool,
     /// Download attachments when they enter view instead of on click.
@@ -568,6 +570,7 @@ impl Default for Settings {
             info_pane_width: 380.0,
             enter_sends: true,
             send_read_receipts: true,
+            privacy_blur: false,
             send_typing: true,
             auto_download: true,
             show_wallpaper: true,

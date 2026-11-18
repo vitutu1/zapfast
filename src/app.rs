@@ -768,6 +768,7 @@ pub struct App {
     /// The new-contact dialog's "Save to phone" box.
     pub new_contact_to_phone: bool,
     pub sidebar_visible: bool,
+    pub privacy_blur: bool,
     /// Demo/test: keep this starred row's context menu open.
     #[cfg(any(test, feature = "demo"))]
     pub open_list_menu: Option<(ChatId, String)>,
@@ -1564,6 +1565,7 @@ impl App {
         // With a password set, ZapFast starts locked.
         let app_lock = crate::app_lock::AppLock::new(settings.app_lock_hash.is_some());
         let tray_lockable = settings.app_lock_hash.is_some();
+        let privacy_blur = settings.privacy_blur;
         let mut app = Self {
             dirs,
             settings,
@@ -1718,6 +1720,7 @@ impl App {
             group_description_edit: None,
             new_contact_to_phone: true,
             sidebar_visible: true,
+            privacy_blur,
             #[cfg(any(test, feature = "demo"))]
             open_list_menu: None,
             label_name: String::new(),
@@ -2571,7 +2574,7 @@ impl App {
         let Some(chat) = self.chat(chat_id) else {
             return;
         };
-        if self.app_lock.is_locked() || !self.settings.notification_content {
+        if self.app_lock.is_locked() || !self.settings.notification_content || self.privacy_blur {
             self.notify_without_content(chat_id, chat.is_group(), &message.id, limited);
             return;
         }
@@ -9252,6 +9255,11 @@ impl App {
                 });
             }
             Action::ToggleSidebar => self.sidebar_visible = !self.sidebar_visible,
+            Action::TogglePrivacyBlur => {
+                self.privacy_blur = !self.privacy_blur;
+                self.settings.privacy_blur = self.privacy_blur;
+                self.save_settings();
+            }
             Action::SetChatFilter(filter) => {
                 if self.locked_folder {
                     self.close_locked_folder();
@@ -11483,6 +11491,7 @@ impl App {
         self.theme_transition.paint(ctx);
         // Release the image caches of everything that scrolled away.
         crate::image_cache::sweep(ctx);
+        crate::ui::widgets::sweep_blurred_cache(ctx);
         // Only fading info toasts animate. Errors wait for the reader.
         if self
             .toasts
